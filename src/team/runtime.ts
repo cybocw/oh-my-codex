@@ -50,6 +50,7 @@ import {
   teamMarkMessageDelivered as markMessageDelivered,
   teamMarkMessageNotified as markMessageNotified,
   teamEnqueueDispatchRequest as enqueueDispatchRequest,
+  teamListDispatchRequests as listDispatchRequests,
   teamMarkDispatchRequestNotified as markDispatchRequestNotified,
   teamTransitionDispatchRequest as transitionDispatchRequest,
   teamReadDispatchRequest as readDispatchRequest,
@@ -71,6 +72,7 @@ import {
   type TeamWorkerIntegrationState,
   type TeamGovernance,
   type TeamPolicy,
+  type TeamDispatchRequest,
 } from './team-ops.js';
 import {
   queueInboxInstruction,
@@ -830,6 +832,7 @@ const TEAM_LEADER_CWD_ENV = 'OMX_TEAM_LEADER_CWD';
 const WORKTREE_TRIGGER_STATE_ROOT = '$OMX_TEAM_STATE_ROOT';
 const STARTUP_EVIDENCE_TIMEOUT_MS = 2_000;
 const STARTUP_EVIDENCE_POLL_MS = 100;
+const PROMPT_STARTUP_NO_EVIDENCE_GRACE_MS = 500;
 
 interface PromptWorkerHandle {
   child: ChildProcessByStdio<Writable, null, null>;
@@ -898,23 +901,33 @@ async function assertNestedTeamAllowed(cwd: string): Promise<void> {
 
 type WorkerStartupEvidence = 'task_claim' | 'worker_progress' | 'leader_ack' | 'none';
 
-async function readWorkerStartupEvidence(
-  teamName: string,
+function deriveWorkerStartupEvidence(
   workerName: string,
-  cwd: string,
-): Promise<WorkerStartupEvidence> {
-  const status = await readWorkerStatus(teamName, workerName, cwd);
+  status: WorkerStatus,
+  leaderMailbox: Awaited<ReturnType<typeof listMailboxMessages>>,
+): WorkerStartupEvidence {
   if (typeof status.current_task_id === 'string' && status.current_task_id.trim() !== '') {
     return 'task_claim';
   }
   if (status.state === 'working' || status.state === 'blocked' || status.state === 'done' || status.state === 'failed') {
     return 'worker_progress';
   }
-  const leaderMailbox = await listMailboxMessages(teamName, 'leader-fixed', cwd).catch(() => []);
   if (leaderMailbox.some((message) => message?.from_worker === workerName)) {
     return 'leader_ack';
   }
   return 'none';
+}
+
+async function readWorkerStartupEvidence(
+  teamName: string,
+  workerName: string,
+  cwd: string,
+): Promise<WorkerStartupEvidence> {
+  const [status, leaderMailbox] = await Promise.all([
+    readWorkerStatus(teamName, workerName, cwd),
+    listMailboxMessages(teamName, 'leader-fixed', cwd).catch(() => []),
+  ]);
+  return deriveWorkerStartupEvidence(workerName, status, leaderMailbox);
 }
 
 function doesStartupEvidenceSettle(
@@ -954,6 +967,52 @@ export async function waitForClaudeStartupEvidence(params: {
   pollMs?: number;
 }): Promise<WorkerStartupEvidence> {
   return await waitForWorkerStartupEvidence({ ...params, workerCli: 'claude' });
+}
+
+function findLatestPromptStartupDispatchRequest(
+  requests: TeamDispatchRequest[],
+  workerName: string,
+): TeamDispatchRequest | null {
+  const startupCorrelationKey = `startup:${workerName}`;
+  let latest: TeamDispatchRequest | null = null;
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+
+  for (const request of requests) {
+    if (request.kind !== 'inbox') continue;
+    if (request.to_worker !== workerName) continue;
+    if (request.inbox_correlation_key !== startupCorrelationKey) continue;
+    const candidateTimestamp = Date.parse(request.notified_at ?? request.updated_at ?? request.created_at);
+    if (!Number.isFinite(candidateTimestamp) || candidateTimestamp < latestTimestamp) continue;
+    latest = request;
+    latestTimestamp = candidateTimestamp;
+  }
+
+  return latest;
+}
+
+function buildPromptStartupNoEvidenceReason(workerName: string, request: TeamDispatchRequest, ageMs: number): string {
+  const ageLabel = Math.max(0, Math.floor(ageMs));
+  return `prompt_startup_no_evidence:${workerName}:${request.request_id}:${ageLabel}ms`;
+}
+
+function detectPromptStartupStall(params: {
+  workerName: string;
+  startupRequest: TeamDispatchRequest | null;
+  startupEvidence: WorkerStartupEvidence;
+  nowMs: number;
+}): string | null {
+  const { workerName, startupRequest, startupEvidence, nowMs } = params;
+  if (!startupRequest) return null;
+  if (startupRequest.status !== 'notified') return null;
+  if (startupEvidence !== 'none') return null;
+
+  const notifiedAtMs = Date.parse(startupRequest.notified_at ?? startupRequest.updated_at ?? startupRequest.created_at);
+  if (!Number.isFinite(notifiedAtMs)) return null;
+
+  const ageMs = nowMs - notifiedAtMs;
+  if (ageMs < PROMPT_STARTUP_NO_EVIDENCE_GRACE_MS) return null;
+
+  return buildPromptStartupNoEvidenceReason(workerName, startupRequest, ageMs);
 }
 
 function shouldSkipWorkerReadyWait(env: NodeJS.ProcessEnv): boolean {
@@ -1127,8 +1186,18 @@ async function teardownPromptWorker(
 
 function isPromptWorkerAlive(config: TeamConfig, worker: WorkerInfo): boolean {
   const handle = getPromptWorkerHandle(config.name, worker.name);
-  if (handle?.child.exitCode === null && !handle.child.killed) return true;
-  return isPidAlive(worker.pid as number);
+  const pid = typeof handle?.pid === 'number' && Number.isFinite(handle.pid)
+    ? handle.pid
+    : worker.pid as number;
+  const pidAlive = isPidAlive(pid);
+
+  if (!handle) return pidAlive;
+  if (handle.child.exitCode === null && !handle.child.killed && pidAlive) return true;
+
+  // Prompt workers can disappear before Node updates the in-memory child state.
+  // Trust the OS-level pid check and drop stale handles so monitor/status stays accurate.
+  removePromptWorkerHandle(config.name, worker.name);
+  return false;
 }
 
 export { TEAM_LOW_COMPLEXITY_DEFAULT_MODEL };
@@ -1815,6 +1884,12 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
   const deadWorkers: string[] = [];
   const nonReportingWorkers: string[] = [];
   const recommendations: string[] = [];
+  const promptLeaderMailbox = config.worker_launch_mode === 'prompt'
+    ? await listMailboxMessages(sanitized, 'leader-fixed', cwd).catch(() => [])
+    : [];
+  const promptDispatchRequests = config.worker_launch_mode === 'prompt'
+    ? await listDispatchRequests(sanitized, cwd, { kind: 'inbox' })
+    : [];
 
   const workerScanStartMs = performance.now();
   const workerSignals = await Promise.all(
@@ -1826,12 +1901,39 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
         readWorkerStatus(sanitized, worker.name, cwd),
         readWorkerHeartbeat(sanitized, worker.name, cwd),
       ]);
-      return { worker, alive, status, heartbeat };
+      const startupEvidence = config.worker_launch_mode === 'prompt'
+        ? deriveWorkerStartupEvidence(worker.name, status, promptLeaderMailbox)
+        : 'none';
+      const startupRequest = config.worker_launch_mode === 'prompt'
+        ? findLatestPromptStartupDispatchRequest(promptDispatchRequests, worker.name)
+        : null;
+      const startupStallReason = config.worker_launch_mode === 'prompt' && alive
+        ? detectPromptStartupStall({
+          workerName: worker.name,
+          startupRequest,
+          startupEvidence,
+          nowMs: Date.now(),
+        })
+        : null;
+      const effectiveStatus = startupStallReason
+        ? {
+          ...status,
+          reason: startupStallReason,
+          updated_at: new Date().toISOString(),
+        }
+        : status;
+      return {
+        worker,
+        alive: startupStallReason ? false : alive,
+        status: effectiveStatus,
+        heartbeat,
+        startupStallReason,
+      };
     })
   );
   const workerScanMs = performance.now() - workerScanStartMs;
 
-  for (const { worker: w, alive, status, heartbeat } of workerSignals) {
+  for (const { worker: w, alive, status, heartbeat, startupStallReason } of workerSignals) {
     const currentTask = status.current_task_id ? taskById.get(status.current_task_id) ?? null : null;
     const previousTurns = previousSnapshot ? (previousSnapshot.workerTurnCountByName[w.name] ?? 0) : null;
     const previousTaskId = previousSnapshot?.workerTaskIdByName[w.name] ?? '';
@@ -1858,6 +1960,9 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
 
     if (!alive) {
       deadWorkers.push(w.name);
+      if (startupStallReason) {
+        recommendations.push(`Detected prompt startup stall for ${w.name}: ${startupStallReason}`);
+      }
       // Find in-progress tasks owned by this dead worker
       const deadWorkerTasks = inProgressByOwner.get(w.name) || [];
       for (const t of deadWorkerTasks) {
