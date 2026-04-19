@@ -1113,12 +1113,21 @@ function buildNotifyPayload(threadId: string, turnId: string, lastMessage: strin
   };
 }
 
+function buildNotifyHookEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('OMX_TEST_')) delete env[key];
+  }
+  return env;
+}
+
 async function invokeNotifyHook(payload: Record<string, unknown>, filePath: string): Promise<void> {
   const result = spawnSync(process.execPath, [notifyScript, JSON.stringify(payload)], {
     cwd,
     encoding: 'utf-8',
-      windowsHide: true,
-    });
+    env: buildNotifyHookEnv(),
+    windowsHide: true,
+  });
   const ok = result.status === 0;
   await eventLog({
     type: 'fallback_notify',
