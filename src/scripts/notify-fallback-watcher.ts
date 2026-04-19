@@ -100,6 +100,8 @@ const watcherOwnerToken = `${process.pid}-${startedAt}-${Math.random().toString(
 const RALPH_CONTINUE_TEXT = 'Ralph loop active continue';
 const RALPH_CONTINUE_CADENCE_MS = 60_000;
 const RALPH_STEER_LOCK_STALE_MS = 30_000;
+const RALPH_STEER_LOCK_INIT_GRACE_MS = 250;
+const RALPH_STEER_LOCK_RETRY_MS = 25;
 const RALPH_TERMINAL_PHASES = new Set(['complete', 'failed', 'cancelled']);
 
 interface WatcherFileMeta {
@@ -513,6 +515,14 @@ async function withRalphSteerLock<T>(task: () => Promise<T>): Promise<T | null> 
       const code = error !== null && typeof error === 'object' ? (error as NodeJS.ErrnoException).code : '';
       if (code !== 'EEXIST') throw error;
       const existing = await readRalphSteerLock(ralphSteerLockPath);
+      if (!existing) {
+        const lockStats = await stat(ralphSteerLockPath).catch(() => null);
+        const lockAgeMs = lockStats ? Math.max(0, Date.now() - lockStats.mtimeMs) : Number.POSITIVE_INFINITY;
+        if (lockAgeMs < RALPH_STEER_LOCK_INIT_GRACE_MS) {
+          await sleep(RALPH_STEER_LOCK_RETRY_MS);
+          continue;
+        }
+      }
       const lockAgeMs = parseIsoMillis(existing?.acquired_at) ?? 0;
       const stale = !existing || !isPidAlive(existing.pid) || (lockAgeMs > 0 && Date.now() - lockAgeMs > RALPH_STEER_LOCK_STALE_MS);
       if (stale) {
