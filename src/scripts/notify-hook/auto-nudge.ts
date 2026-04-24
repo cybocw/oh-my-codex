@@ -444,6 +444,22 @@ function resolveInvocationSessionId(payload) {
   ).trim();
 }
 
+function resolveAutoNudgeEventTimeMs(payload, fallbackMs) {
+  const candidates = [
+    payload?.timestamp,
+    payload?.['timestamp'],
+    payload?.created_at,
+    payload?.['created-at'],
+  ];
+  for (const value of candidates) {
+    const parsed = Date.parse(safeString(value));
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return fallbackMs;
+}
+
 
 function sanitizeTmuxToken(value) {
   const cleaned = safeString(value)
@@ -597,6 +613,8 @@ export async function resolveNudgePaneTarget(stateDir: any, cwd = '') {
 }
 
 export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
+  const invocationStartedAtMs = Date.now();
+  const eventTimeMs = resolveAutoNudgeEventTimeMs(payload, invocationStartedAtMs);
   const config = await loadAutoNudgeConfig();
   if (!config.enabled) return;
 
@@ -667,7 +685,7 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
       && safeString(nudgeState.lastSemanticSignature) === semanticSignature
       && config.ttlMs > 0
       && Number.isFinite(lastNudgeAtMs)
-      && (Date.now() - lastNudgeAtMs) < config.ttlMs
+      && (eventTimeMs - lastNudgeAtMs) < config.ttlMs
     ) {
       await logTmuxHookEvent(logsDir, {
         timestamp: new Date().toISOString(),
@@ -732,7 +750,6 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
       await new Promise(r => setTimeout(r, config.delaySec * 1000));
     }
 
-    const nowIso = new Date().toISOString();
     try {
       const sendResult = await sendPaneInput({
         paneTarget: paneId,
@@ -744,6 +761,7 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
         throw new Error(sendResult.error || sendResult.reason);
       }
 
+      const nowIso = new Date().toISOString();
       nudgeState.nudgeCount = (asNumber(nudgeState.nudgeCount) ?? 0) + 1;
       nudgeState.lastNudgeAt = nowIso;
       nudgeState.lastSignature = signature;
@@ -769,7 +787,7 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
       });
     } catch (err) {
       await logTmuxHookEvent(logsDir, {
-        timestamp: nowIso,
+        timestamp: new Date().toISOString(),
         type: 'auto_nudge',
         pane_id: paneId,
         error: err instanceof Error ? err.message : safeString(err),

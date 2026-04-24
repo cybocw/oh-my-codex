@@ -24,6 +24,7 @@ import {
   listAutoresearchDeepInterviewResultPaths,
   resolveAutoresearchDeepInterviewResult,
 } from './autoresearch-intake.js';
+import { injectSparkReasoningSummaryCompatArgs } from './codex-launch-compat.js';
 import { CODEX_BYPASS_FLAG, MADMAX_FLAG } from './constants.js';
 import { restoreStandaloneHudPane, enableMouseScrolling } from '../team/tmux-session.js';
 
@@ -149,7 +150,11 @@ export function normalizeAutoresearchCodexArgs(codexArgs: readonly string[]): st
 
 function runAutoresearchTurn(worktreePath: string, instructionsFile: string, codexArgs: string[]): void {
   const prompt = readFileSync(instructionsFile, 'utf-8');
-  const launchArgs = ['exec', ...normalizeAutoresearchCodexArgs(codexArgs), '-'];
+  const launchArgs = injectSparkReasoningSummaryCompatArgs([
+    'exec',
+    ...normalizeAutoresearchCodexArgs(codexArgs),
+    '-',
+  ]);
   const result = spawnSync('codex', launchArgs, {
     cwd: worktreePath,
     stdio: ['pipe', 'inherit', 'inherit'],

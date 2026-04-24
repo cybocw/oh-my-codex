@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'node:url';
 import { safeString } from './utils.js';
 import { resolveBridgeStateDir, resolveRuntimeBinaryPath } from '../../runtime/bridge.js';
+import { normalizeDispatchRequest, overlayBridgeDispatchRequests } from '../../team/state/dispatch.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -85,6 +86,16 @@ async function readBridgeDispatchRequests(stateDir, teamName) {
       };
     })
     .filter((record) => record && record.request_id && record.to_worker && record.trigger_message);
+}
+
+async function readDispatchAttemptSidecar(teamDirPath, teamName) {
+  const candidate = join(teamDirPath, 'dispatch', 'requests.json');
+  const parsed = await readJson(candidate, []);
+  if (!Array.isArray(parsed)) return [];
+  const nowIso = new Date().toISOString();
+  return parsed
+    .map((entry) => normalizeDispatchRequest(teamName, entry ?? {}, nowIso))
+    .filter((record) => record !== null);
 }
 
 async function writeJsonAtomic(path, value) {
@@ -524,7 +535,9 @@ export async function drainPendingTeamDispatch({
     await withDispatchLock(teamDirPath, async () => {
       const bridgeRequests = await readBridgeDispatchRequests(stateDir, teamName);
       const usingLegacyRequests = bridgeRequests === null;
-      const requests = usingLegacyRequests ? await readJson(requestsPath, []) : bridgeRequests;
+      const requests = usingLegacyRequests
+        ? await readJson(requestsPath, [])
+        : overlayBridgeDispatchRequests(bridgeRequests, await readDispatchAttemptSidecar(teamDirPath, teamName));
       if (!Array.isArray(requests)) return;
       const issueCooldownState = await readIssueCooldownState(teamDirPath);
       const triggerCooldownState = await readTriggerCooldownState(teamDirPath);
@@ -676,9 +689,11 @@ export async function drainPendingTeamDispatch({
           request.notified_at = nowIso;
           request.last_reason = result.reason;
           runtimeExec({ command: 'MarkNotified', request_id: request.request_id, channel: 'tmux' }, stateDir);
-          if (usingLegacyRequests && request.kind === 'mailbox' && request.message_id) {
+          if (request.kind === 'mailbox' && request.message_id) {
             runtimeExec({ command: 'MarkMailboxNotified', message_id: request.message_id }, stateDir);
-            await updateMailboxNotified(stateDir, teamName, request.to_worker, request.message_id).catch(() => {});
+            if (usingLegacyRequests) {
+              await updateMailboxNotified(stateDir, teamName, request.to_worker, request.message_id).catch(() => {});
+            }
           }
           processed += 1;
           mutated = true;
@@ -725,9 +740,7 @@ export async function drainPendingTeamDispatch({
         await writeJsonAtomic(issueCooldownStatePath(teamDirPath), issueCooldownState);
         triggerCooldownState.by_trigger = triggerCooldownByKey;
         await writeJsonAtomic(triggerCooldownStatePath(teamDirPath), triggerCooldownState);
-        if (usingLegacyRequests) {
-          await writeJsonAtomic(requestsPath, requests);
-        }
+        await writeJsonAtomic(requestsPath, requests);
       }
     });
   }

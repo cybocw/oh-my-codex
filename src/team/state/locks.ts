@@ -9,6 +9,7 @@ interface TeamPathDeps {
 }
 
 const LOCK_OWNER_RETRY_MS = 25;
+const MAILBOX_LOCK_TIMEOUT_MS = 15_000;
 
 function lockOwnerToken(): string {
   return `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
@@ -181,7 +182,7 @@ export async function withMailboxLock<T>(
   const lockDir = deps.mailboxLockDir(teamName, workerName, cwd);
   const ownerPath = join(lockDir, 'owner');
   const ownerToken = lockOwnerToken();
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + MAILBOX_LOCK_TIMEOUT_MS;
   await mkdir(dirname(lockDir), { recursive: true });
   while (true) {
     try {

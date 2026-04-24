@@ -186,7 +186,7 @@ switch (command.command) {
       delivered_at: null,
     });
     writeJson(mailboxPath, mailbox);
-    process.stdout.write(JSON.stringify({ event: 'MailboxMessageCreated', message_id: command.message_id, from_worker: command.from_worker, to_worker: command.to_worker }) + '\\n');
+    process.stdout.write(JSON.stringify({ event: 'MailboxMessageCreated', message_id: command.message_id, from_worker: command.from_worker, to_worker: command.to_worker, body: command.body }) + '\\n');
     process.exit(0);
   }
   case 'MarkMailboxNotified': {
@@ -484,6 +484,57 @@ exit 1
 
       const after = await readFile(legacyPath, 'utf8');
       assert.deepEqual(JSON.parse(after), [], 'bridge-success path should not rewrite legacy dispatch requests.json');
+    } finally {
+      if (typeof previousRuntimeBinary === 'string') process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      else delete process.env.OMX_RUNTIME_BINARY;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('overlays bridge-authored dispatch records with sidecar attempt counts', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-bridge-attempts-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    try {
+      await initTeamState('team-dispatch-bridge-attempts', 't', 'executor', 1, cwd);
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await mkdir(fakeBinDir, { recursive: true });
+      await writeCompatRuntimeFixture(join(fakeBinDir, 'omx-runtime'), runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = join(fakeBinDir, 'omx-runtime');
+
+      const queued = await enqueueDispatchRequest(
+        'team-dispatch-bridge-attempts',
+        {
+          kind: 'inbox',
+          to_worker: 'worker-1',
+          trigger_message: 'retry me',
+        },
+        cwd,
+      );
+
+      const legacyPath = join(cwd, '.omx', 'state', 'team', 'team-dispatch-bridge-attempts', 'dispatch', 'requests.json');
+      await writeFile(
+        legacyPath,
+        JSON.stringify([
+          {
+            request_id: queued.request.request_id,
+            kind: 'inbox',
+            team_name: 'team-dispatch-bridge-attempts',
+            to_worker: 'worker-1',
+            trigger_message: 'retry me',
+            status: 'pending',
+            attempt_count: 2,
+            created_at: queued.request.created_at,
+            updated_at: queued.request.updated_at,
+            last_reason: 'tmux_send_keys_unconfirmed',
+          },
+        ], null, 2),
+      );
+
+      const request = await readDispatchRequest('team-dispatch-bridge-attempts', queued.request.request_id, cwd);
+      assert.equal(request?.status, 'pending');
+      assert.equal(request?.attempt_count, 2);
+      assert.equal(request?.last_reason, 'tmux_send_keys_unconfirmed');
     } finally {
       if (typeof previousRuntimeBinary === 'string') process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
       else delete process.env.OMX_RUNTIME_BINARY;

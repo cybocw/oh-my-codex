@@ -1,5 +1,12 @@
 import { randomUUID } from 'crypto';
-import { getDefaultBridge, isBridgeEnabled, resolveBridgeStateDir, type DispatchRecord, type RuntimeCommand } from '../../runtime/bridge.js';
+import {
+  getDefaultBridge,
+  isBridgeEnabled,
+  resolveBridgeStateDir,
+  shouldPersistBridgeSidecars,
+  type DispatchRecord,
+  type RuntimeCommand,
+} from '../../runtime/bridge.js';
 
 export type TeamDispatchRequestKind = 'inbox' | 'mailbox' | 'nudge';
 export type TeamDispatchRequestStatus = 'pending' | 'notified' | 'delivered' | 'failed';
@@ -201,6 +208,86 @@ export function normalizeBridgeDispatchRecord(
   );
 }
 
+export function overlayBridgeDispatchRequests(
+  bridgeRequests: TeamDispatchRequest[],
+  sidecarRequests: TeamDispatchRequest[],
+  options: { includeSidecarOnly?: boolean } = {},
+): TeamDispatchRequest[] {
+  const includeSidecarOnly = options.includeSidecarOnly ?? shouldPersistBridgeSidecars();
+  if (!Array.isArray(bridgeRequests) || bridgeRequests.length === 0) {
+    return Array.isArray(sidecarRequests) ? sidecarRequests : [];
+  }
+  if (!Array.isArray(sidecarRequests) || sidecarRequests.length === 0) return bridgeRequests;
+
+  const sidecarById = new Map(
+    sidecarRequests
+      .filter((request) => request && typeof request.request_id === 'string' && request.request_id.trim() !== '')
+      .map((request) => [request.request_id, request] as const),
+  );
+
+  const merged = bridgeRequests.map((request) => {
+    const sidecar = sidecarById.get(request.request_id);
+    if (!sidecar) return request;
+
+    const nextAttemptCount = Number.isFinite(sidecar.attempt_count)
+      ? Math.max(request.attempt_count, Math.max(0, Math.floor(sidecar.attempt_count)))
+      : request.attempt_count;
+    const bridgeUpdatedAtMs = Date.parse(request.updated_at);
+    const sidecarUpdatedAtMs = Date.parse(sidecar.updated_at);
+    const sidecarHasNewerState =
+      Number.isFinite(sidecarUpdatedAtMs)
+      && (!Number.isFinite(bridgeUpdatedAtMs) || sidecarUpdatedAtMs >= bridgeUpdatedAtMs);
+    const nextLastReason =
+      typeof sidecar.last_reason === 'string' && sidecar.last_reason !== '' && (sidecarHasNewerState || !request.last_reason)
+        ? sidecar.last_reason
+        : request.last_reason;
+    const nextUpdatedAt =
+      typeof sidecar.updated_at === 'string' && sidecar.updated_at !== '' && sidecarHasNewerState
+        ? sidecar.updated_at
+        : request.updated_at;
+    const nextStatus = sidecarHasNewerState ? sidecar.status : request.status;
+    const nextNotifiedAt =
+      typeof sidecar.notified_at === 'string' && sidecar.notified_at !== '' && (sidecarHasNewerState || !request.notified_at)
+        ? sidecar.notified_at
+        : request.notified_at;
+    const nextDeliveredAt =
+      typeof sidecar.delivered_at === 'string' && sidecar.delivered_at !== '' && (sidecarHasNewerState || !request.delivered_at)
+        ? sidecar.delivered_at
+        : request.delivered_at;
+    const nextFailedAt =
+      typeof sidecar.failed_at === 'string' && sidecar.failed_at !== '' && (sidecarHasNewerState || !request.failed_at)
+        ? sidecar.failed_at
+        : request.failed_at;
+
+    return {
+      ...request,
+      status: nextStatus,
+      attempt_count: nextAttemptCount,
+      notified_at: nextStatus === 'pending' ? undefined : nextNotifiedAt,
+      delivered_at: nextStatus === 'delivered' ? nextDeliveredAt : undefined,
+      failed_at: nextStatus === 'failed' ? nextFailedAt : undefined,
+      last_reason: nextLastReason,
+      updated_at: nextUpdatedAt,
+    };
+  });
+
+  if (includeSidecarOnly) {
+    const bridgedIds = new Set(bridgeRequests.map((request) => request.request_id));
+    for (const sidecar of sidecarRequests) {
+      if (!bridgedIds.has(sidecar.request_id)) {
+        merged.push(sidecar);
+      }
+    }
+  }
+  return merged;
+}
+
+async function persistBridgeDispatchSidecarSnapshot(deps: DispatchDeps): Promise<void> {
+  if (!shouldPersistBridgeSidecars()) return;
+  const snapshot = await deps.readDispatchRequests(deps.teamName, deps.cwd);
+  await deps.writeDispatchRequests(deps.teamName, snapshot, deps.cwd);
+}
+
 export async function enqueueDispatchRequest(
   requestInput: TeamDispatchRequestInput,
   deps: DispatchDeps,
@@ -238,7 +325,10 @@ export async function enqueueDispatchRequest(
       metadata: buildDispatchMetadata(deps.teamName, requestInput),
     })) {
       const bridgeRequest = await readDispatchRequest(request.request_id, deps);
-      if (bridgeRequest) return { request: bridgeRequest, deduped: false };
+      if (bridgeRequest) {
+        await persistBridgeDispatchSidecarSnapshot(deps);
+        return { request: bridgeRequest, deduped: false };
+      }
     }
 
     requests.push(request);
@@ -322,6 +412,7 @@ export async function markDispatchRequestNotified(
     request_id: requestId,
     channel: patch.last_reason ?? patch.message_id ?? 'tmux',
   })) {
+    await persistBridgeDispatchSidecarSnapshot(deps);
     return await readDispatchRequest(requestId, deps) ?? current;
   }
   return await transitionDispatchRequest(requestId, current.status, 'notified', patch, deps);
@@ -336,6 +427,7 @@ export async function markDispatchRequestDelivered(
   if (!current) return null;
   if (current.status === 'delivered') return current;
   if (executeBridgeCommand(deps.cwd, { command: 'MarkDelivered', request_id: requestId })) {
+    await persistBridgeDispatchSidecarSnapshot(deps);
     return await readDispatchRequest(requestId, deps) ?? current;
   }
   return await transitionDispatchRequest(requestId, current.status, 'delivered', patch, deps);
@@ -347,6 +439,7 @@ export async function markDispatchRequestFailed(
   deps: DispatchDeps,
 ): Promise<void> {
   if (executeBridgeCommand(deps.cwd, { command: 'MarkFailed', request_id: requestId, reason })) {
+    await persistBridgeDispatchSidecarSnapshot(deps);
     return;
   }
   await transitionDispatchRequest(requestId, 'pending', 'failed', { last_reason: reason }, deps);

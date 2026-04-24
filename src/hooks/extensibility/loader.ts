@@ -44,7 +44,7 @@ export function isHookPluginsEnabled(env: NodeJS.ProcessEnv = process.env): bool
 
 export function resolveHookPluginTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
-  fallback = 1500,
+  fallback = 3000,
 ): number {
   return readTimeout(env[HOOK_PLUGIN_TIMEOUT_ENV], fallback);
 }

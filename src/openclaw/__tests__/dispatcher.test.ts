@@ -4,6 +4,8 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import {
   validateGatewayUrl,
@@ -12,6 +14,23 @@ import {
   isCommandGateway,
   resolveCommandTimeoutMs,
 } from '../dispatcher.js';
+
+// Use a tiny shell script instead of `node -e` to avoid slow child-Node startup
+// dominating sub-second timeout assertions on loaded machines.
+async function withSleepCommand(
+  delaySeconds: string,
+  run: (command: string) => Promise<void>,
+): Promise<void> {
+  const tempDir = await mkdtemp(join(process.cwd(), '.tmp-openclaw-dispatcher-'));
+  const scriptPath = join(tempDir, 'sleep.sh');
+  await writeFile(scriptPath, `#!/bin/sh\nsleep ${delaySeconds}\n`, 'utf-8');
+  await chmod(scriptPath, 0o755);
+  try {
+    await run(`sh ${scriptPath}`);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
 
 describe('validateGatewayUrl', () => {
   it('accepts https URLs', () => {
@@ -204,24 +223,28 @@ describe('wakeCommandGateway - command gate', () => {
     const { wakeCommandGateway } = await import('../dispatcher.js');
     process.env.OMX_OPENCLAW_COMMAND = '1';
     process.env.OMX_OPENCLAW_COMMAND_TIMEOUT_MS = '100';
-    const result = await wakeCommandGateway(
-      'test',
-      { type: 'command', command: "node -e \"setTimeout(() => {}, 250)\"" },
-      {},
-    );
-    assert.equal(result.success, false);
-    assert.ok(result.error?.includes('SIGTERM'));
+    await withSleepCommand('0.25', async (command) => {
+      const result = await wakeCommandGateway(
+        'test',
+        { type: 'command', command },
+        {},
+      );
+      assert.equal(result.success, false);
+      assert.ok(result.error?.includes('SIGTERM'));
+    });
   });
 
   it('uses gateway timeout over env timeout', async () => {
     const { wakeCommandGateway } = await import('../dispatcher.js');
     process.env.OMX_OPENCLAW_COMMAND = '1';
     process.env.OMX_OPENCLAW_COMMAND_TIMEOUT_MS = '100';
-    const result = await wakeCommandGateway(
-      'test',
-      { type: 'command', command: "node -e \"setTimeout(() => {}, 250)\"", timeout: 500 },
-      {},
-    );
-    assert.equal(result.success, true);
+    await withSleepCommand('0.25', async (command) => {
+      const result = await wakeCommandGateway(
+        'test',
+        { type: 'command', command, timeout: 2000 },
+        {},
+      );
+      assert.equal(result.success, true);
+    });
   });
 });

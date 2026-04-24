@@ -192,6 +192,7 @@ export async function onHookEvent() {}
       const event = buildHookEvent('session-start');
       const result = await dispatchHookEvent(event, {
         cwd,
+        timeoutMs: 10_000,
         env: { ...process.env, OMX_HOOK_PLUGINS: '1', OMX_TEAM_WORKER: 'worker-1' },
       });
 

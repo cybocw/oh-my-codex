@@ -1218,14 +1218,17 @@ export function waitForWorkerReady(
     const target = paneTarget(sessionName, workerIndex, workerPaneId);
     const result = runTmux(sharedBuildVisibleCapturePaneArgv(target));
     if (!result.ok) return false;
-    if (dismissClaudeBypassPermissionsPromptIfPresent(target, result.stdout)) {
+    let visibleCapture = result.stdout;
+    if (dismissClaudeBypassPermissionsPromptIfPresent(target, visibleCapture)) {
       promptDismissed = true;
+      const refreshedResult = runTmux(sharedBuildVisibleCapturePaneArgv(target));
+      if (!refreshedResult.ok) return false;
+      visibleCapture = refreshedResult.stdout;
+    }
+    if (paneHasClaudeBypassPermissionsPrompt(visibleCapture)) {
       return false;
     }
-    if (paneHasClaudeBypassPermissionsPrompt(result.stdout)) {
-      return false;
-    }
-    if (paneHasTrustPrompt(result.stdout)) {
+    if (paneHasTrustPrompt(visibleCapture)) {
       // Default-on for team workers: they are spawned explicitly by the leader in the same cwd.
       // Opt-out by setting OMX_TEAM_AUTO_TRUST=0.
       if (process.env.OMX_TEAM_AUTO_TRUST !== '0') {
@@ -1236,11 +1239,11 @@ export function waitForWorkerReady(
       blockedByTrustPrompt = true;
       return false;
     }
-    if (paneLooksReady(result.stdout)) return true;
+    if (paneLooksReady(visibleCapture)) return true;
     // Keep startup safety checks anchored to the visible pane. Only if the
     // visible slice already proves a live Codex viewport do we consult recent
     // scrollback for the prompt/helper text that may have slipped below the fold.
-    if (!sharedPaneShowsCodexViewport(result.stdout)) return false;
+    if (!sharedPaneShowsCodexViewport(visibleCapture)) return false;
 
     const scrollbackResult = runTmux(sharedBuildCapturePaneArgv(target, 80));
     if (!scrollbackResult.ok) return false;

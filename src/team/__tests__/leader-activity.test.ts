@@ -151,4 +151,48 @@ describe('leader runtime activity', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it('gives recent team-status activity a small grace window before declaring the leader stale', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-leader-activity-'));
+    try {
+      const stateDir = join(cwd, '.omx', 'state');
+      await mkdir(stateDir, { recursive: true });
+      const nowMs = Date.parse('2026-03-21T04:10:12.000Z');
+
+      await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
+        last_turn_at: '2026-03-21T04:00:00.000Z',
+      }));
+      await writeFile(join(stateDir, 'leader-runtime-activity.json'), JSON.stringify({
+        last_activity_at: '2026-03-21T04:10:00.000Z',
+        last_team_status_at: '2026-03-21T04:10:00.000Z',
+        last_source: 'team_status',
+      }));
+
+      assert.equal(await isLeaderRuntimeStale(stateDir, 10_000, nowMs), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('still declares the leader stale once the team-status grace window has elapsed', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-leader-activity-'));
+    try {
+      const stateDir = join(cwd, '.omx', 'state');
+      await mkdir(stateDir, { recursive: true });
+      const nowMs = Date.parse('2026-03-21T04:10:16.000Z');
+
+      await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
+        last_turn_at: '2026-03-21T04:00:00.000Z',
+      }));
+      await writeFile(join(stateDir, 'leader-runtime-activity.json'), JSON.stringify({
+        last_activity_at: '2026-03-21T04:10:00.000Z',
+        last_team_status_at: '2026-03-21T04:10:00.000Z',
+        last_source: 'team_status',
+      }));
+
+      assert.equal(await isLeaderRuntimeStale(stateDir, 10_000, nowMs), true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 });

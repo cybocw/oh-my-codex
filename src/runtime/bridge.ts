@@ -8,7 +8,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { omxStateDir } from '../utils/paths.js';
 
@@ -77,7 +77,7 @@ export type RuntimeEvent =
   | { event: 'DispatchFailed'; request_id: string; reason: string }
   | { event: 'ReplayRequested'; cursor?: string }
   | { event: 'SnapshotCaptured' }
-  | { event: 'MailboxMessageCreated'; message_id: string; from_worker: string; to_worker: string }
+  | { event: 'MailboxMessageCreated'; message_id: string; from_worker: string; to_worker: string; body: string }
   | { event: 'MailboxNotified'; message_id: string }
   | { event: 'MailboxDelivered'; message_id: string };
 
@@ -133,9 +133,15 @@ export function resolveRuntimeBinaryPath(options: RuntimeBinaryDiscoveryOptions 
 export function resolveBridgeStateDir(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.OMX_TEAM_STATE_ROOT;
   if (typeof explicit === 'string' && explicit.trim() !== '') {
-    return resolve(cwd, explicit.trim());
+    const normalized = explicit.trim();
+    return isAbsolute(normalized) ? normalized : resolve(cwd, normalized);
   }
   return omxStateDir(cwd);
+}
+
+export function shouldPersistBridgeSidecars(env: NodeJS.ProcessEnv = process.env): boolean {
+  const explicitRuntimeBinary = env.OMX_RUNTIME_BINARY;
+  return !(typeof explicitRuntimeBinary === 'string' && explicitRuntimeBinary.trim() !== '');
 }
 
 export class RuntimeBridge {

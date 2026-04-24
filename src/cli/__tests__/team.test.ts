@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildLeaderMonitoringHints, parseTeamStartArgs, teamCommand } from '../team.js';
@@ -858,7 +858,7 @@ describe('teamCommand status', () => {
   });
 
   it('returns pane ids and sparkshell hint in JSON mode', async () => {
-    const wd = await mkdtemp(join(tmpdir(), 'omx-team-status-json-'));
+    const wd = await realpath(await mkdtemp(join(tmpdir(), 'omx-team-status-json-')));
     const previousCwd = process.cwd();
     const logs: string[] = [];
     const originalLog = console.log;

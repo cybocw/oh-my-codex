@@ -1,6 +1,6 @@
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, realpathSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { codexHome } from '../utils/paths.js';
 
@@ -247,11 +247,37 @@ function buildSnippet(text: string, query: string, context: number, caseSensitiv
   return `${prefix}${text.slice(start, end).replace(/\s+/g, ' ').trim()}${suffix}`;
 }
 
+function canonicalPath(value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (!isAbsolute(value)) return value;
+  try {
+    return typeof realpathSync.native === 'function' ? realpathSync.native(value) : realpathSync(value);
+  } catch {
+    return value;
+  }
+}
+
+function filterCandidates(value: string | null | undefined): string[] {
+  if (!value) return [];
+  const candidates = [value];
+  const canonical = canonicalPath(value);
+  if (canonical && canonical !== value) candidates.push(canonical);
+  return candidates;
+}
+
 function matchesFilter(value: string | null, filter: string | undefined, caseSensitive: boolean): boolean {
   if (!filter) return true;
   if (!value) return false;
-  if (caseSensitive) return value.includes(filter);
-  return value.toLowerCase().includes(filter.toLowerCase());
+
+  const values = filterCandidates(value);
+  const filters = filterCandidates(filter);
+  if (caseSensitive) {
+    return values.some((candidate) => filters.some((expected) => candidate.includes(expected)));
+  }
+  return values.some((candidate) => {
+    const normalizedCandidate = candidate.toLowerCase();
+    return filters.some((expected) => normalizedCandidate.includes(expected.toLowerCase()));
+  });
 }
 
 async function searchRolloutFile(

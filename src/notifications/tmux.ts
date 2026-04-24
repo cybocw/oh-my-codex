@@ -10,6 +10,7 @@ import { buildCapturePaneArgv } from "./tmux-detector.js";
 const TMUX_PANE_TARGET_RE = /^%\d+$/;
 const DEFAULT_CAPTURE_LINES = 12;
 const MAX_CAPTURE_LINES = 2000;
+const TMUX_COMMAND_TIMEOUT_MS = 5_000;
 
 function shouldUsePidFallback(): boolean {
   return process.env.OMX_TMUX_PID_FALLBACK === "1";
@@ -32,7 +33,7 @@ export function getCurrentTmuxSession(): string | null {
         : "tmux display-message -p '#S'";
       const sessionName = execSync(displayCmd, {
         encoding: "utf-8",
-        timeout: 3000,
+        timeout: TMUX_COMMAND_TIMEOUT_MS,
         stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }).trim();
@@ -61,7 +62,7 @@ function detectTmuxSessionByPid(): string | null {
       "tmux list-panes -a -F '#{pane_pid} #{session_name}'",
       {
         encoding: "utf-8",
-        timeout: 3000,
+        timeout: TMUX_COMMAND_TIMEOUT_MS,
         stdio: ["pipe", "pipe", "pipe"],
       }
     ).trim();
@@ -122,7 +123,7 @@ export function getTeamTmuxSessions(teamName: string): string[] {
   try {
     const output = execSync("tmux list-sessions -F '#{session_name}'", {
       encoding: "utf-8",
-      timeout: 3000,
+      timeout: TMUX_COMMAND_TIMEOUT_MS,
       stdio: ["pipe", "pipe", "pipe"],
     });
     return output
@@ -151,7 +152,7 @@ export function captureTmuxPane(paneId?: string | null, lines: number = 12): str
   try {
     const output = execFileSync("tmux", buildCapturePaneArgv(target, clampedLines), {
       encoding: "utf-8",
-      timeout: 3000,
+      timeout: TMUX_COMMAND_TIMEOUT_MS,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }).trim();
@@ -190,7 +191,7 @@ export function getCurrentTmuxPaneId(): string | null {
     try {
       const paneId = execSync("tmux display-message -p '#{pane_id}'", {
         encoding: "utf-8",
-        timeout: 3000,
+        timeout: TMUX_COMMAND_TIMEOUT_MS,
         stdio: ["pipe", "pipe", "pipe"],
       }).trim();
       if (paneId && /^%\d+$/.test(paneId)) return paneId;
@@ -214,7 +215,7 @@ function detectTmuxPaneByPid(): string | null {
       "tmux list-panes -a -F '#{pane_pid} #{pane_id}'",
       {
         encoding: "utf-8",
-        timeout: 3000,
+        timeout: TMUX_COMMAND_TIMEOUT_MS,
         stdio: ["pipe", "pipe", "pipe"],
       }
     ).trim();

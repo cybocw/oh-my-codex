@@ -84,6 +84,11 @@ describe("config generator idempotency (#384)", () => {
       const toml = await readFile(configPath, "utf-8");
 
       assertSingleOmxBlock(toml);
+      assert.equal(
+        count(toml, /^startup_timeout_sec = 30$/gm),
+        5,
+        "OMX MCP servers should use a startup timeout that tolerates slow Node startup",
+      );
       assert.match(toml, /^multi_agent = true$/m);
       assert.match(toml, /^child_agents_md = true$/m);
     } finally {

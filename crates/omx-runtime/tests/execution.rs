@@ -210,3 +210,40 @@ fn snapshot_from_state_dir_reads_persisted_state() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn mailbox_message_body_survives_exec_reload() {
+    let dir = std::env::temp_dir().join("omx-runtime-test-mailbox-body-reload");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+        .args(["init", dir.to_str().unwrap()])
+        .output()
+        .expect("init");
+
+    let state_arg = format!("--state-dir={}", dir.display());
+    let first_message = r#"{"command":"CreateMailboxMessage","message_id":"msg-1","from_worker":"worker-1","to_worker":"worker-2","body":"hello mailbox"}"#;
+    Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+        .args(["exec", first_message, &state_arg])
+        .output()
+        .expect("first mailbox exec");
+
+    let second_message = r#"{"command":"CreateMailboxMessage","message_id":"msg-2","from_worker":"worker-2","to_worker":"worker-1","body":"follow-up"}"#;
+    Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+        .args(["exec", second_message, &state_arg])
+        .output()
+        .expect("second mailbox exec");
+
+    let mailbox_contents = std::fs::read_to_string(dir.join("mailbox.json")).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&mailbox_contents).expect("valid mailbox JSON");
+    let records = parsed["records"].as_array().expect("mailbox records");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["message_id"], "msg-1");
+    assert_eq!(records[0]["body"], "hello mailbox");
+    assert_eq!(records[1]["message_id"], "msg-2");
+    assert_eq!(records[1]["body"], "follow-up");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

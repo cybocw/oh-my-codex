@@ -66,7 +66,7 @@ describe('isHookPluginsEnabled', () => {
 
 describe('resolveHookPluginTimeoutMs', () => {
   it('returns fallback when env var is missing', () => {
-    assert.equal(resolveHookPluginTimeoutMs({}), 1500);
+    assert.equal(resolveHookPluginTimeoutMs({}), 3000);
   });
 
   it('returns custom fallback', () => {
@@ -90,11 +90,11 @@ describe('resolveHookPluginTimeoutMs', () => {
   });
 
   it('returns fallback for non-numeric string', () => {
-    assert.equal(resolveHookPluginTimeoutMs({ [HOOK_PLUGIN_TIMEOUT_ENV]: 'abc' }), 1500);
+    assert.equal(resolveHookPluginTimeoutMs({ [HOOK_PLUGIN_TIMEOUT_ENV]: 'abc' }), 3000);
   });
 
   it('returns fallback for empty string', () => {
-    assert.equal(resolveHookPluginTimeoutMs({ [HOOK_PLUGIN_TIMEOUT_ENV]: '' }), 1500);
+    assert.equal(resolveHookPluginTimeoutMs({ [HOOK_PLUGIN_TIMEOUT_ENV]: '' }), 3000);
   });
 });
 

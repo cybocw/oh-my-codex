@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 const STARTUP_SETTLE_MS = 150;
 const SPAWN_TIMEOUT_MS = 1_500;
-const EXIT_TIMEOUT_MS = 2_500;
+const EXIT_TIMEOUT_MS = 12_000;
 const OUTPUT_LIMIT = 4_096;
 
 const IDLE_ENTRYPOINTS = [

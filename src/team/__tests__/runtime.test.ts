@@ -59,6 +59,11 @@ async function addWorktree(repo: string, branchName: string, pathPrefix: string)
 function expectedLowComplexityModel(codexHomeOverride?: string): string {
   return resolveTeamLowComplexityDefaultModel(codexHomeOverride);
 }
+
+function expectedSummaryOverride(model: string): string[] {
+  return model.includes('spark') ? ['-c', 'model_reasoning_summary="none"'] : [];
+}
+
 function withEmptyPath<T>(fn: () => T): T {
   const prev = process.env.PATH;
   process.env.PATH = '';
@@ -198,7 +203,7 @@ describe('runtime', () => {
       { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
       'explore',
     );
-    assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+    assert.deepEqual(args, ['--no-alt-screen', ...expectedSummaryOverride(expectedLowComplexityModel()), '--model', expectedLowComplexityModel()]);
   });
 
   it('resolveWorkerLaunchArgsFromEnv reads low-complexity model from config when present', async () => {
@@ -235,7 +240,7 @@ describe('runtime', () => {
       { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
       'executor-low',
     );
-    assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+    assert.deepEqual(args, ['--no-alt-screen', ...expectedSummaryOverride(expectedLowComplexityModel()), '--model', expectedLowComplexityModel()]);
   });
 
   it('resolveWorkerLaunchArgsFromEnv preserves explicit model in either syntax', () => {
@@ -313,7 +318,14 @@ describe('runtime', () => {
       );
       assert.deepEqual(
         args,
-        ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', expectedLowComplexityModel()],
+        [
+          '--no-alt-screen',
+          '-c',
+          'model_reasoning_effort="high"',
+          ...expectedSummaryOverride(expectedLowComplexityModel()),
+          '--model',
+          expectedLowComplexityModel(),
+        ],
       );
     } finally {
       console.log = originalLog;
@@ -335,7 +347,14 @@ describe('runtime', () => {
       );
       assert.deepEqual(
         args,
-        ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', expectedLowComplexityModel()],
+        [
+          '--no-alt-screen',
+          '-c',
+          'model_reasoning_effort="high"',
+          ...expectedSummaryOverride(expectedLowComplexityModel()),
+          '--model',
+          expectedLowComplexityModel(),
+        ],
       );
     } finally {
       console.log = originalLog;
@@ -523,7 +542,7 @@ describe('runtime', () => {
         { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
         'explore',
       );
-      assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+      assert.deepEqual(args, ['--no-alt-screen', ...expectedSummaryOverride(expectedLowComplexityModel()), '--model', expectedLowComplexityModel()]);
     } finally {
       console.log = originalLog;
     }
@@ -813,6 +832,7 @@ process.on('SIGTERM', () => process.exit(0));
       assert.equal(argv[argv.indexOf('--model') + 1], 'gpt-5.3-codex-spark');
       assert.equal(argv.includes('-c'), true);
       assert.equal(argv.includes('model_reasoning_effort="low"'), true);
+      assert.equal(argv.includes('model_reasoning_summary="none"'), true);
       assert.equal(argv.some((arg) => arg.includes('model_instructions_file=')), true);
 
       await shutdownTeam(runtime.teamName, cwd, { force: true });

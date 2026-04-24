@@ -11,6 +11,7 @@ const CODEX_BYPASS_FLAG = '--dangerously-bypass-approvals-and-sandbox';
 const MODEL_FLAG = '--model';
 const CONFIG_FLAG = '-c';
 const REASONING_KEY = 'model_reasoning_effort';
+const SUMMARY_KEY = 'model_reasoning_summary';
 
 const LOW_COMPLEXITY_AGENT_TYPES = new Set([
   'explore',
@@ -26,6 +27,7 @@ export interface ParsedTeamWorkerLaunchArgs {
   passthrough: string[];
   wantsBypass: boolean;
   reasoningOverride: string | null;
+  summaryOverride: string | null;
   modelOverride: string | null;
 }
 
@@ -38,6 +40,10 @@ export interface ResolveTeamWorkerLaunchArgsOptions {
 
 function isReasoningOverride(value: string): boolean {
   return new RegExp(`^${REASONING_KEY}\\s*=`).test(value.trim());
+}
+
+function isSummaryOverride(value: string): boolean {
+  return new RegExp(`^${SUMMARY_KEY}\\s*=`).test(value.trim());
 }
 
 function isValidModelValue(value: string): boolean {
@@ -59,6 +65,10 @@ function normalizeOptionalReasoning(reasoning?: TeamReasoningEffort | string | n
   return undefined;
 }
 
+function isSparkModel(model?: string | null): boolean {
+  return normalizeOptionalModel(model)?.toLowerCase().includes('spark') ?? false;
+}
+
 export function splitWorkerLaunchArgs(raw: string | undefined): string[] {
   if (!raw || raw.trim() === '') return [];
   return raw
@@ -71,6 +81,7 @@ export function parseTeamWorkerLaunchArgs(args: string[]): ParsedTeamWorkerLaunc
   const passthrough: string[] = [];
   let wantsBypass = false;
   let reasoningOverride: string | null = null;
+  let summaryOverride: string | null = null;
   let modelOverride: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
@@ -106,6 +117,11 @@ export function parseTeamWorkerLaunchArgs(args: string[]): ParsedTeamWorkerLaunc
         i += 1;
         continue;
       }
+      if (typeof maybeValue === 'string' && isSummaryOverride(maybeValue)) {
+        summaryOverride = maybeValue;
+        i += 1;
+        continue;
+      }
     }
 
     passthrough.push(arg);
@@ -115,6 +131,7 @@ export function parseTeamWorkerLaunchArgs(args: string[]): ParsedTeamWorkerLaunc
     passthrough,
     wantsBypass,
     reasoningOverride,
+    summaryOverride,
     modelOverride,
   };
 }
@@ -125,6 +142,7 @@ export function collectInheritableTeamWorkerArgs(codexArgs: string[]): string[] 
   const inherited: string[] = [];
   if (parsed.wantsBypass) inherited.push(CODEX_BYPASS_FLAG);
   if (parsed.reasoningOverride) inherited.push(CONFIG_FLAG, parsed.reasoningOverride);
+  if (parsed.summaryOverride) inherited.push(CONFIG_FLAG, parsed.summaryOverride);
   if (parsed.modelOverride) inherited.push(MODEL_FLAG, parsed.modelOverride);
   return inherited;
 }
@@ -146,6 +164,8 @@ export function normalizeTeamWorkerLaunchArgs(
   if (selectedReasoning) normalized.push(CONFIG_FLAG, selectedReasoning);
 
   const selectedModel = normalizeOptionalModel(preferredModel) ?? normalizeOptionalModel(parsed.modelOverride);
+  const selectedSummary = parsed.summaryOverride ?? (isSparkModel(selectedModel) ? `${SUMMARY_KEY}="none"` : null);
+  if (selectedSummary) normalized.push(CONFIG_FLAG, selectedSummary);
   if (selectedModel) normalized.push(MODEL_FLAG, selectedModel);
 
   return normalized;

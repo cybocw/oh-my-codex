@@ -92,6 +92,7 @@ describe('example hook plugins', () => {
 
       const result = await dispatchHookEvent(event, {
         cwd,
+        timeoutMs: 10_000,
         env: {
           ...process.env,
           OMX_HOOK_PLUGINS: '1',
@@ -137,6 +138,7 @@ describe('example hook plugins', () => {
 
         const result = await dispatchHookEvent(envelope, {
           cwd,
+          timeoutMs: 10_000,
           env: {
             ...process.env,
             OMX_HOOK_PLUGINS: '1',

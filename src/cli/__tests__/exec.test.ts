@@ -122,4 +122,38 @@ describe('omx exec', () => {
       await rm(wd, { recursive: true, force: true });
     }
   });
+
+  it('injects spark reasoning summary compatibility for omx exec launches', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-exec-spark-'));
+    try {
+      const home = join(wd, 'home');
+      const fakeBin = join(wd, 'bin');
+      const fakeCodexPath = join(fakeBin, 'codex');
+
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await mkdir(fakeBin, { recursive: true });
+      await writeFile(
+        fakeCodexPath,
+        [
+          '#!/bin/sh',
+          'printf \'fake-codex:%s\\n\' "$*"',
+        ].join('\n'),
+      );
+      await chmod(fakeCodexPath, 0o755);
+
+      const result = runOmx(wd, ['exec', '--model', 'gpt-5.3-codex-spark', 'say hi'], {
+        HOME: home,
+        NODE_OPTIONS: '',
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        OMX_AUTO_UPDATE: '0',
+        OMX_NOTIFY_FALLBACK: '0',
+        OMX_HOOK_DERIVED_SIGNALS: '0',
+      });
+
+      assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
+      assert.match(result.stdout, /model_reasoning_summary="none"/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
 });

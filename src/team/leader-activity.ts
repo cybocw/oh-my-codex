@@ -12,12 +12,14 @@ interface LeaderRuntimeActivityDoc {
 }
 
 interface LeaderRuntimeSignalStatus {
-  source: 'hud' | 'leader_runtime_activity' | 'leader_branch_git_activity';
+  source: 'hud' | 'leader_runtime_activity' | 'leader_runtime_team_status' | 'leader_branch_git_activity';
   at: string | null;
   ms: number;
   valid: boolean;
   fresh: boolean;
 }
+
+const TEAM_STATUS_STALENESS_GRACE_MS = 5_000;
 
 async function readJsonIfExists(path: string): Promise<Record<string, unknown> | null> {
   try {
@@ -200,9 +202,19 @@ export async function readLeaderRuntimeSignalStatuses(
     readLeaderBranchGitActivityMs(stateDir),
   ]);
 
-  const signals: Array<{ source: LeaderRuntimeSignalStatus['source']; at: unknown; ms?: number }> = [
+  const signals: Array<{
+    source: LeaderRuntimeSignalStatus['source'];
+    at: unknown;
+    ms?: number;
+    freshThresholdMs?: number;
+  }> = [
     { source: 'hud', at: hudState?.last_turn_at },
     { source: 'leader_runtime_activity', at: leaderActivity?.last_activity_at },
+    {
+      source: 'leader_runtime_team_status',
+      at: leaderActivity?.last_team_status_at,
+      freshThresholdMs: thresholdMs + TEAM_STATUS_STALENESS_GRACE_MS,
+    },
     {
       source: 'leader_branch_git_activity',
       at: Number.isFinite(leaderGitActivityMs) ? new Date(leaderGitActivityMs).toISOString() : null,
@@ -210,10 +222,11 @@ export async function readLeaderRuntimeSignalStatuses(
     },
   ];
 
-  return signals.map(({ source, at, ms: providedMs }) => {
+  return signals.map(({ source, at, ms: providedMs, freshThresholdMs }) => {
     const ms = Number.isFinite(providedMs) ? Number(providedMs) : parseIsoMs(at);
     const valid = Number.isFinite(ms);
-    const fresh = valid && (nowMs - ms) < thresholdMs;
+    const freshnessWindowMs = Number.isFinite(freshThresholdMs) ? Number(freshThresholdMs) : thresholdMs;
+    const fresh = valid && (nowMs - ms) < freshnessWindowMs;
     return {
       source,
       at: typeof at === 'string' && at.trim().length > 0 ? at : null,

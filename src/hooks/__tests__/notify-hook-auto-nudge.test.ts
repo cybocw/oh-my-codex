@@ -69,7 +69,11 @@ function escapeRegex(value: string): string {
  * Build a fake tmux binary that logs all invocations and optionally returns
  * capture-pane content from OMX_TEST_CAPTURE_FILE.
  */
-function buildFakeTmux(tmuxLogPath: string, paneInMode: '0' | '1' = '0'): string {
+function buildFakeTmux(
+  tmuxLogPath: string,
+  paneInMode: '0' | '1' = '0',
+  sendKeysDelaySec = '0',
+): string {
   return `#!/usr/bin/env bash
 set -eu
 echo "$@" >> "${tmuxLogPath}"
@@ -82,6 +86,9 @@ if [[ "\$cmd" == "capture-pane" ]]; then
   exit 0
 fi
 if [[ "\$cmd" == "send-keys" ]]; then
+  if [[ "${sendKeysDelaySec}" != "0" ]]; then
+    sleep "${sendKeysDelaySec}"
+  fi
   exit 0
 fi
 if [[ "\$cmd" == "display-message" ]]; then
@@ -916,13 +923,16 @@ exit 0
       await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
       await chmod(join(fakeBinDir, 'tmux'), 0o755);
 
+      const baseTimeMs = Date.now();
       const first = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        timestamp: new Date(baseTimeMs).toISOString(),
         'turn-id': 'cooldown-turn-1',
         'last-assistant-message': 'Would you like me to continue with the implementation?',
       });
       assert.equal(first.status, 0, `first hook failed: ${first.stderr || first.stdout}`);
 
       const second = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        timestamp: new Date(baseTimeMs + 500).toISOString(),
         'turn-id': 'cooldown-turn-2',
         'last-assistant-message': 'I can also move forward with the implementation.',
       });
@@ -939,6 +949,7 @@ exit 0
       });
 
       const third = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        timestamp: new Date(baseTimeMs + 10_000).toISOString(),
         'turn-id': 'cooldown-turn-3',
         'last-assistant-message': 'Do you want me to proceed with the focused tests?',
       });
@@ -949,6 +960,51 @@ exit 0
 
       const nudgeState = JSON.parse(await readFile(nudgeStatePath, 'utf-8'));
       assert.equal(nudgeState.nudgeCount, 2);
+      assert.equal(nudgeState.lastSemanticSignature, 'stall:proceed_intent');
+    });
+  });
+
+  it('starts the TTL window after injection finishes so slow send-keys does not consume the cooldown', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const omxDir = join(cwd, '.omx');
+      const stateDir = join(omxDir, 'state');
+      const logsDir = join(omxDir, 'logs');
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const tmuxLogPath = join(cwd, 'tmux.log');
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(stateDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0, ttlMs: 1000 },
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath, '0', '0.4'));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const baseTimeMs = Date.now();
+      const first = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        timestamp: new Date(baseTimeMs).toISOString(),
+        'turn-id': 'slow-send-turn-1',
+        'last-assistant-message': 'Would you like me to continue with the implementation?',
+      });
+      assert.equal(first.status, 0, `first hook failed: ${first.stderr || first.stdout}`);
+
+      const second = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        timestamp: new Date(baseTimeMs + 500).toISOString(),
+        'turn-id': 'slow-send-turn-2',
+        'last-assistant-message': 'I can also move forward with the implementation.',
+      });
+      assert.equal(second.status, 0, `second hook failed: ${second.stderr || second.stdout}`);
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.equal((tmuxLog.match(/send-keys -t %99 -l yes, proceed \[OMX_TMUX_INJECT\]/g) || []).length, 1);
+
+      const nudgeState = JSON.parse(await readFile(join(stateDir, 'auto-nudge-state.json'), 'utf-8'));
+      assert.equal(nudgeState.nudgeCount, 1);
       assert.equal(nudgeState.lastSemanticSignature, 'stall:proceed_intent');
     });
   });

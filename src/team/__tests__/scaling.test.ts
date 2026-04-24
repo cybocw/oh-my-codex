@@ -811,6 +811,88 @@ exit 0
     }
   });
 
+  it('injects spark summary override into scaled codex worker startup commands', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-up-spark-summary-'));
+    const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-up-spark-summary-bin-'));
+    const tmuxLogPath = join(fakeBinDir, 'tmux.log');
+    const tmuxStubPath = join(fakeBinDir, 'tmux');
+    const previousPath = process.env.PATH;
+
+    try {
+      await writeFile(
+        tmuxStubPath,
+        `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.2a"
+    ;;
+  split-window)
+    echo "%31"
+    ;;
+  list-panes)
+    echo "42424"
+    ;;
+  capture-pane)
+    echo ""
+    ;;
+esac
+exit 0
+`,
+      );
+      await chmod(tmuxStubPath, 0o755);
+      await writeFile(tmuxLogPath, '');
+      process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+
+      const teamName = 'scale-up-spark-summary';
+      await initTeamState(teamName, 'task', 'explore', 1, cwd);
+      await mkdir(join(cwd, '.omx', 'state', 'team', teamName), { recursive: true });
+      await writeFile(join(cwd, '.omx', 'state', 'team', teamName, 'worker-agents.md'), '# Base worker instructions\n');
+
+      const config = await readTeamConfig(teamName, cwd);
+      assert.ok(config);
+      if (!config) return;
+      config.tmux_session = `omx-team-${teamName}`;
+      config.leader_pane_id = '%11';
+      config.workers[0]!.pane_id = '%21';
+      await saveTeamConfig(config, cwd);
+
+      const manifestPath = join(cwd, '.omx', 'state', 'team', teamName, 'manifest.v2.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as { policy?: Record<string, unknown> };
+      manifest.policy = {
+        ...(manifest.policy ?? {}),
+        dispatch_mode: 'transport_direct',
+      };
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const result = await scaleUp(
+        teamName,
+        1,
+        'explore',
+        [],
+        cwd,
+        {
+          OMX_TEAM_SCALING_ENABLED: '1',
+          OMX_TEAM_SKIP_READY_WAIT: '1',
+          OMX_TEAM_WORKER_LAUNCH_ARGS: '--model gpt-5.3-codex-spark -c model_reasoning_effort="low"',
+        },
+      );
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.match(tmuxLog, /gpt-5\.3-codex-spark/);
+      assert.match(tmuxLog, /model_reasoning_effort="low"/);
+      assert.match(tmuxLog, /model_reasoning_summary="none"/);
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(cwd, { recursive: true, force: true });
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
+  });
+
   it('provisions detached worktrees for scaled-up workers from persisted team worktree mode', async () => {
     const repo = await initRepo();
     const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-up-detached-bin-'));

@@ -1136,6 +1136,41 @@ describe('team worker CLI helpers', () => {
     );
   });
 
+  it('translateWorkerLaunchArgsForCli drops codex-only spark config for gemini workers', () => {
+    assert.deepEqual(
+      translateWorkerLaunchArgsForCli(
+        'gemini',
+        [
+          '--model',
+          'gpt-5.3-codex-spark',
+          '-c',
+          'model_reasoning_summary="none"',
+          '-c',
+          'model_reasoning_effort="low"',
+        ],
+        'Read worker inbox',
+      ),
+      ['--approval-mode', 'yolo', '-i', 'Read worker inbox'],
+    );
+  });
+
+  it('translateWorkerLaunchArgsForCli drops codex-only spark config for claude workers', () => {
+    assert.deepEqual(
+      translateWorkerLaunchArgsForCli(
+        'claude',
+        [
+          '--model',
+          'gpt-5.3-codex-spark',
+          '-c',
+          'model_reasoning_summary="none"',
+          '-c',
+          'model_reasoning_effort="low"',
+        ],
+      ),
+      ['--dangerously-skip-permissions'],
+    );
+  });
+
   it('assertTeamWorkerCliBinaryAvailable throws clear error when binary missing', () => {
     assert.throws(
       () => assertTeamWorkerCliBinaryAvailable('claude', () => false),
@@ -1265,6 +1300,27 @@ describe('team worker launch mode helpers', () => {
       assert.deepEqual(spec.args, ['--model', 'gpt-5.3-codex', '--dangerously-bypass-approvals-and-sandbox']);
       assert.equal(spec.env.OMX_TEAM_WORKER, 'alpha-team/worker-2');
       assert.equal(spec.env.OMX_TEAM_STATE_ROOT, '/tmp/workspace/.omx/state');
+    } finally {
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('buildWorkerProcessLaunchSpec strips codex spark config when launching gemini workers', () => {
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const spec = buildWorkerProcessLaunchSpec(
+        'gamma-team',
+        3,
+        ['--model', 'gpt-5.3-codex-spark', '-c', 'model_reasoning_summary="none"'],
+        '/tmp/workspace',
+        {},
+        'gemini',
+        'Read worker inbox',
+      );
+      assert.equal(spec.workerCli, 'gemini');
+      assert.deepEqual(spec.args, ['--approval-mode', 'yolo', '-i', 'Read worker inbox']);
     } finally {
       if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
       else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;

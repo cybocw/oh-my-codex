@@ -1,5 +1,5 @@
 import { appendFile, readFile, writeFile, mkdir, rm, rename, readdir } from 'fs/promises';
-import { join, dirname, resolve, sep } from 'path';
+import { join, dirname, resolve, sep, isAbsolute } from 'path';
 import { existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { omxStateDir } from '../utils/paths.js';
@@ -29,6 +29,7 @@ import {
   markDispatchRequestDelivered as markDispatchRequestDeliveredImpl,
   normalizeBridgeDispatchRecord,
   normalizeDispatchRequest as normalizeDispatchRequestImpl,
+  overlayBridgeDispatchRequests,
 } from './state/dispatch.js';
 import {
   resolveDispatchLockTimeoutMs as resolveDispatchLockTimeoutMsImpl,
@@ -549,7 +550,8 @@ function normalizeTask(task: TeamTask): TeamTaskV2 {
 function resolveTeamStateRoot(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.OMX_TEAM_STATE_ROOT;
   if (typeof explicit === 'string' && explicit.trim() !== '') {
-    return resolve(cwd, explicit.trim());
+    const normalized = explicit.trim();
+    return isAbsolute(normalized) ? normalized : resolve(cwd, normalized);
   }
   return omxStateDir(cwd);
 }
@@ -1403,34 +1405,40 @@ async function writeMailbox(teamName: string, mailbox: TeamMailbox, cwd: string)
 }
 
 async function readDispatchRequests(teamName: string, cwd: string): Promise<TeamDispatchRequest[]> {
+  const readLegacyDispatchSidecar = async (): Promise<TeamDispatchRequest[]> => {
+    const path = dispatchRequestsPath(teamName, cwd);
+    try {
+      if (!existsSync(path)) return [];
+      const raw = await readFile(path, 'utf8');
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      const nowIso = new Date().toISOString();
+      return parsed
+        .map((entry) => normalizeDispatchRequestImpl(teamName, (entry ?? {}) as Partial<TeamDispatchRequest>, nowIso))
+        .filter((entry): entry is TeamDispatchRequest => entry !== null);
+    } catch {
+      return [];
+    }
+  };
+
   if (isBridgeEnabled()) {
     try {
       const bridge = getDefaultBridge(resolveBridgeStateDir(cwd));
       const compat = bridge.readCompatFile<{ records?: unknown[] }>('dispatch.json');
       if (compat) {
         const nowIso = new Date().toISOString();
-        return bridge.readDispatchRecords()
+        const bridgeRequests = bridge.readDispatchRecords()
           .map((record) => normalizeBridgeDispatchRecord(teamName, record, nowIso))
           .filter((record): record is TeamDispatchRequest => record !== null);
+        const sidecarRequests = await readLegacyDispatchSidecar();
+        return overlayBridgeDispatchRequests(bridgeRequests, sidecarRequests);
       }
     } catch {
       // fall through to legacy file fallback
     }
   }
 
-  const path = dispatchRequestsPath(teamName, cwd);
-  try {
-    if (!existsSync(path)) return [];
-    const raw = await readFile(path, 'utf8');
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    const nowIso = new Date().toISOString();
-    return parsed
-      .map((entry) => normalizeDispatchRequestImpl(teamName, (entry ?? {}) as Partial<TeamDispatchRequest>, nowIso))
-      .filter((entry): entry is TeamDispatchRequest => entry !== null);
-  } catch {
-    return [];
-  }
+  return await readLegacyDispatchSidecar();
 }
 
 async function writeDispatchRequests(teamName: string, requests: TeamDispatchRequest[], cwd: string): Promise<void> {

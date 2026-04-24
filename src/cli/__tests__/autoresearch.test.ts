@@ -518,7 +518,10 @@ esac
 
       const tmuxOutput = await readFile(tmuxLog, 'utf-8');
       assert.match(tmuxOutput, /split-window -h -t %9 -d -P -F #\{pane_id\} -c/);
-      assert.match(tmuxOutput, /'autoresearch' '\/tmp\/[^']+\/missions\/demo' '--model' 'gpt-5'/);
+      assert.match(
+        tmuxOutput,
+        new RegExp(`'autoresearch' '${missionDir.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}' '--model' 'gpt-5'`),
+      );
       assert.doesNotMatch(tmuxOutput, /kill-pane -t %9/);
     } finally {
       await rm(repo, { recursive: true, force: true });
@@ -770,6 +773,63 @@ printf '{\\n  "status": "abort",\\n  "candidate_commit": null,\\n  "base_commit"
 
       assert.equal(result.status, 0, result.stderr || result.stdout);
       assert.match(result.stderr, /fake-codex:exec --dangerously-bypass-approvals-and-sandbox -/);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it('injects spark reasoning summary compatibility for autoresearch codex exec turns', async () => {
+    const repo = await initRepo();
+    const fakeBin = await mkdtemp(join(tmpdir(), 'omx-autoresearch-spark-bin-'));
+    try {
+      const missionDir = join(repo, 'missions', 'demo');
+      await mkdir(missionDir, { recursive: true });
+      await mkdir(join(repo, 'scripts'), { recursive: true });
+      await writeFile(join(missionDir, 'mission.md'), '# Mission\nWrite a noop candidate artifact.\n', 'utf-8');
+      await writeFile(
+        join(missionDir, 'sandbox.md'),
+        '---\nevaluator:\n  command: node scripts/eval.js\n  format: json\n  keep_policy: pass_only\n---\nStay inside the mission boundary.\n',
+        'utf-8',
+      );
+      await writeFile(join(repo, 'scripts', 'eval.js'), "process.stdout.write(JSON.stringify({ pass: true }));\n", 'utf-8');
+      execFileSync('git', ['add', '.'], { cwd: repo, stdio: 'ignore' });
+      execFileSync('git', ['commit', '-m', 'add autoresearch spark mission'], { cwd: repo, stdio: 'ignore' });
+
+      const fakeCodexPath = join(fakeBin, 'codex');
+      await writeFile(
+        fakeCodexPath,
+        `#!/bin/sh
+printf 'fake-codex:%s\\n' "$*" >&2
+while IFS= read -r _; do
+  :
+done
+candidate_file=$(find "$OMX_TEST_REPO_ROOT/.omx/logs/autoresearch" -name candidate.json | head -n 1)
+head_commit=$(git rev-parse HEAD)
+printf '{\\n  "status": "abort",\\n  "candidate_commit": null,\\n  "base_commit": "%s",\\n  "description": "stop after first exec",\\n  "notes": ["fake codex exec"],\\n  "created_at": "2026-03-15T00:00:00.000Z"\\n}\\n' "$head_commit" >"$candidate_file"
+`,
+        'utf-8',
+      );
+      execFileSync('chmod', ['+x', fakeCodexPath], { stdio: 'ignore' });
+
+      const result = runOmx(
+        repo,
+        [
+          'autoresearch',
+          missionDir,
+          '--model',
+          'gpt-5.3-codex-spark',
+          '-c',
+          'model_reasoning_effort="low"',
+          '--dangerously-bypass-approvals-and-sandbox',
+        ],
+        { PATH: `${fakeBin}:${process.env.PATH || ''}`, OMX_TEST_REPO_ROOT: repo },
+      );
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stderr, /fake-codex:.*--model gpt-5\.3-codex-spark/);
+      assert.match(result.stderr, /fake-codex:.*-c model_reasoning_effort="low"/);
+      assert.match(result.stderr, /fake-codex:.*-c model_reasoning_summary="none"/);
     } finally {
       await rm(repo, { recursive: true, force: true });
       await rm(fakeBin, { recursive: true, force: true });

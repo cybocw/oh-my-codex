@@ -1,5 +1,12 @@
 import { randomUUID } from 'crypto';
-import { getDefaultBridge, isBridgeEnabled, resolveBridgeStateDir, type MailboxRecord, type RuntimeCommand } from '../../runtime/bridge.js';
+import {
+  getDefaultBridge,
+  isBridgeEnabled,
+  resolveBridgeStateDir,
+  shouldPersistBridgeSidecars,
+  type MailboxRecord,
+  type RuntimeCommand,
+} from '../../runtime/bridge.js';
 
 export interface TeamMailboxMessage {
   message_id: string;
@@ -91,6 +98,9 @@ export async function sendDirectMessage(
       const bridgeMailbox = await deps.readMailbox(deps.teamName, toWorker, deps.cwd);
       const bridgeMessage = bridgeMailbox.messages.find((candidate) => candidate.message_id === msgId);
       if (bridgeMessage) {
+        if (shouldPersistBridgeSidecars()) {
+          await deps.writeMailbox(deps.teamName, bridgeMailbox, deps.cwd);
+        }
         msg = bridgeMessage;
         created = true;
         return;
@@ -147,7 +157,12 @@ export async function markMessageDelivered(
 ): Promise<boolean> {
   if (executeBridgeCommand(deps.cwd, { command: 'MarkMailboxDelivered', message_id: messageId })) {
     const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-    if (mailbox.messages.some((message) => message.message_id === messageId)) return true;
+    if (mailbox.messages.some((message) => message.message_id === messageId)) {
+      if (shouldPersistBridgeSidecars()) {
+        await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);
+      }
+      return true;
+    }
   }
   return await deps.withMailboxLock(deps.teamName, workerName, deps.cwd, async () => {
     const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
@@ -168,7 +183,12 @@ export async function markMessageNotified(
 ): Promise<boolean> {
   if (executeBridgeCommand(deps.cwd, { command: 'MarkMailboxNotified', message_id: messageId })) {
     const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-    if (mailbox.messages.some((message) => message.message_id === messageId)) return true;
+    if (mailbox.messages.some((message) => message.message_id === messageId)) {
+      if (shouldPersistBridgeSidecars()) {
+        await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);
+      }
+      return true;
+    }
   }
   return await deps.withMailboxLock(deps.teamName, workerName, deps.cwd, async () => {
     const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);

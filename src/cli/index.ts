@@ -18,11 +18,16 @@ import { ralphCommand } from "./ralph.js";
 import { askCommand } from "./ask.js";
 import { cleanupCommand } from "./cleanup.js";
 import { exploreCommand } from "./explore.js";
+import { mcpParityCommand } from "./mcp-parity.js";
 import { sparkshellCommand } from "./sparkshell.js";
 import { agentsInitCommand } from "./agents-init.js";
 import { agentsCommand } from "./agents.js";
 import { sessionCommand } from "./session-search.js";
 import { autoresearchCommand } from "./autoresearch.js";
+import {
+  injectSparkReasoningSummaryCompatArgs,
+  readTopLevelTomlString,
+} from "./codex-launch-compat.js";
 import {
   MADMAX_FLAG,
   CODEX_BYPASS_FLAG,
@@ -95,6 +100,8 @@ import {
   type ParseNotifyTempContractResult,
 } from "../notifications/temp-contract.js";
 
+export { injectSparkReasoningSummaryCompatArgs, readTopLevelTomlString };
+
 export function resolveNotifyFallbackWatcherScript(pkgRoot = getPackageRoot()): string {
   return join(pkgRoot, "dist", "scripts", "notify-fallback-watcher.js");
 }
@@ -134,6 +141,13 @@ Usage:
   omx tmux-hook Manage tmux prompt injection workaround (init|status|validate|test)
   omx hooks     Manage hook plugins (init|status|validate|test)
   omx hud       Show HUD statusline (--watch, --json, --preset=NAME)
+  omx state     CLI parity for OMX state MCP tools
+  omx notepad   CLI parity for OMX notepad MCP tools
+  omx project-memory
+                CLI parity for OMX project-memory MCP tools
+  omx trace     CLI parity for OMX trace MCP tools
+  omx code-intel
+                CLI parity for OMX code-intel MCP tools
   omx sparkshell <command> [args...]
   omx sparkshell --tmux-pane <pane-id> [--tail-lines <100-1000>]
                 Run native sparkshell sidecar for direct command execution or explicit tmux-pane summarization
@@ -219,6 +233,11 @@ type CliCommand =
   | "cleanup"
   | "ask"
   | "explore"
+  | "state"
+  | "notepad"
+  | "project-memory"
+  | "trace"
+  | "code-intel"
   | "sparkshell"
   | "team"
   | "session"
@@ -236,6 +255,11 @@ type CliCommand =
 const NESTED_HELP_COMMANDS = new Set<CliCommand>([
   "ask",
   "cleanup",
+  "state",
+  "notepad",
+  "project-memory",
+  "trace",
+  "code-intel",
   "autoresearch",
   "agents",
   "agents-init",
@@ -378,7 +402,7 @@ export function resolveCodexLaunchPolicy(
   stdinIsTTY: boolean = Boolean(process.stdin.isTTY),
   stdoutIsTTY: boolean = Boolean(process.stdout.isTTY),
 ): CodexLaunchPolicy {
-  if (env.TMUX) return "inside-tmux";
+  if (env.TMUX) return tmuxAvailable ? "inside-tmux" : "direct";
   if (nativeWindows) return "direct";
   if (!stdinIsTTY || !stdoutIsTTY) return "direct";
   return tmuxAvailable ? "detached-tmux" : "direct";
@@ -574,6 +598,11 @@ export async function main(args: string[]): Promise<void> {
     "ask",
     "autoresearch",
     "explore",
+    "state",
+    "notepad",
+    "project-memory",
+    "trace",
+    "code-intel",
     "sparkshell",
     "team",
     "ralph",
@@ -654,6 +683,21 @@ export async function main(args: string[]): Promise<void> {
         break;
       case "explore":
         await exploreCommand(args.slice(1));
+        break;
+      case "state":
+        await mcpParityCommand("state", args.slice(1));
+        break;
+      case "notepad":
+        await mcpParityCommand("notepad", args.slice(1));
+        break;
+      case "project-memory":
+        await mcpParityCommand("project-memory", args.slice(1));
+        break;
+      case "trace":
+        await mcpParityCommand("trace", args.slice(1));
+        break;
+      case "code-intel":
+        await mcpParityCommand("code-intel", args.slice(1));
         break;
       case "exec":
         await execWithOverlay(launchArgs);
@@ -975,11 +1019,14 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     const notifyTempContractRaw = notifyTempResult.contract.active
       ? serializeNotifyTempContract(notifyTempResult.contract)
       : null;
-    const codexArgs = injectModelInstructionsBypassArgs(
-      cwd,
-      ["exec", ...normalizedArgs],
-      process.env,
-      sessionModelInstructionsPath(cwd, sessionId),
+    const codexArgs = injectSparkReasoningSummaryCompatArgs(
+      injectModelInstructionsBypassArgs(
+        cwd,
+        ["exec", ...normalizedArgs],
+        process.env,
+        sessionModelInstructionsPath(cwd, sessionId),
+      ),
+      codexHomeOverride,
     );
     const codexEnvBase = codexHomeOverride
       ? { ...process.env, CODEX_HOME: codexHomeOverride }
@@ -1217,27 +1264,6 @@ export function resolveTeamWorkerLaunchArgsEnv(
   return normalized.join(" ");
 }
 
-export function readTopLevelTomlString(
-  content: string,
-  key: string,
-): string | null {
-  let inTopLevel = true;
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    if (/^\[[^[\]]+\]\s*(#.*)?$/.test(trimmed)) {
-      inTopLevel = false;
-      continue;
-    }
-    if (!inTopLevel) continue;
-    const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.*?)\s*(?:#.*)?$/);
-    if (!match || match[1] !== key) continue;
-    return parseTomlStringValue(match[2]);
-  }
-  return null;
-}
-
 export function upsertTopLevelTomlString(
   content: string,
   key: string,
@@ -1285,17 +1311,6 @@ export function upsertTopLevelTomlString(
   let out = lines.join(eol);
   if (!out.endsWith(eol)) out += eol;
   return out;
-}
-
-function parseTomlStringValue(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
-    return trimmed.slice(1, -1);
-  }
-  if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
 }
 
 function escapeTomlString(value: string): string {
@@ -1691,11 +1706,14 @@ function runCodex(
   codexHomeOverride?: string,
   notifyTempContractRaw?: string | null,
 ): void {
-  const launchArgs = injectModelInstructionsBypassArgs(
-    cwd,
-    args,
-    process.env,
-    sessionModelInstructionsPath(cwd, sessionId),
+  const launchArgs = injectSparkReasoningSummaryCompatArgs(
+    injectModelInstructionsBypassArgs(
+      cwd,
+      args,
+      process.env,
+      sessionModelInstructionsPath(cwd, sessionId),
+    ),
+    codexHomeOverride,
   );
   const nativeWindows = isNativeWindows();
   const omxBin = process.argv[1];

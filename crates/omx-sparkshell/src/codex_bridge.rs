@@ -125,6 +125,8 @@ fn run_codex_exec(
         .arg("read-only")
         .arg("-c")
         .arg("model_reasoning_effort=\"low\"")
+        .arg("-c")
+        .arg("model_reasoning_summary=\"none\"")
         .arg("--skip-git-repo-check")
         .arg("--color")
         .arg("never")

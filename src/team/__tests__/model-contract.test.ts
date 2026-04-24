@@ -14,6 +14,10 @@ function expectedLowComplexityModel(): string {
   return resolveTeamLowComplexityDefaultModel();
 }
 
+function expectedSummaryOverride(model: string): string[] {
+  return model.includes('spark') ? ['-c', 'model_reasoning_summary="none"'] : [];
+}
+
 describe('team model contract', () => {
   it('collects inheritable bypass, reasoning, and model overrides', () => {
     assert.deepEqual(
@@ -61,7 +65,13 @@ describe('team model contract', () => {
         inheritedArgs: ['--dangerously-bypass-approvals-and-sandbox'],
         fallbackModel: expectedLowComplexityModel(),
       }),
-      ['--no-alt-screen', '--dangerously-bypass-approvals-and-sandbox', '--model', expectedLowComplexityModel()],
+      [
+        '--no-alt-screen',
+        '--dangerously-bypass-approvals-and-sandbox',
+        ...expectedSummaryOverride(expectedLowComplexityModel()),
+        '--model',
+        expectedLowComplexityModel(),
+      ],
     );
   });
 
@@ -128,7 +138,13 @@ describe('resolveTeamWorkerLaunchArgs - teammate reasoning allocation', () => {
     });
     assert.deepEqual(
       result,
-      ['-c', 'model_reasoning_effort="low"', '--model', expectedLowComplexityModel()],
+      [
+        '-c',
+        'model_reasoning_effort="low"',
+        ...expectedSummaryOverride(expectedLowComplexityModel()),
+        '--model',
+        expectedLowComplexityModel(),
+      ],
     );
   });
 
@@ -138,6 +154,7 @@ describe('resolveTeamWorkerLaunchArgs - teammate reasoning allocation', () => {
     });
     const joined = result.join(' ');
     assert.ok(!joined.includes('model_reasoning_effort'), `Expected no auto-injected thinking level in: ${joined}`);
+    assert.ok(joined.includes('model_reasoning_summary="none"'), `Expected spark summary override in: ${joined}`);
   });
 
   it('preserves explicit reasoning override over teammate preference', () => {
@@ -160,5 +177,27 @@ describe('resolveTeamWorkerLaunchArgs - teammate reasoning allocation', () => {
     });
     const joined = result.join(' ');
     assert.ok(!joined.includes('model_reasoning_effort'), `Expected no reasoning in: ${joined}`);
+  });
+
+  it('injects reasoning summary none for spark models when no explicit summary is present', () => {
+    const result = resolveTeamWorkerLaunchArgs({
+      existingRaw: '--model gpt-5.3-codex-spark',
+      preferredReasoning: 'low',
+    });
+    assert.deepEqual(
+      result,
+      ['-c', 'model_reasoning_effort="low"', '-c', 'model_reasoning_summary="none"', '--model', 'gpt-5.3-codex-spark'],
+    );
+  });
+
+  it('preserves explicit reasoning summary override for spark models', () => {
+    const result = resolveTeamWorkerLaunchArgs({
+      existingRaw: '--model gpt-5.3-codex-spark -c model_reasoning_summary="detailed"',
+      preferredReasoning: 'low',
+    });
+    const joined = result.join(' ');
+    assert.ok(joined.includes('model_reasoning_summary="detailed"'), `Expected explicit summary override in: ${joined}`);
+    assert.equal(joined.match(/model_reasoning_summary/g)?.length, 1, 'summary override should appear exactly once');
+    assert.ok(!joined.includes('model_reasoning_summary="none"'), `Did not expect injected summary override in: ${joined}`);
   });
 });

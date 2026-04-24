@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseSinceSpec, searchSessionHistory } from '../search.js';
@@ -128,6 +128,47 @@ describe('searchSessionHistory', () => {
       assert.equal(sinceReport.results[0].session_id, 'session-a');
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('treats equivalent project paths as a match for the current-project filter', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omx-session-search-project-alias-'));
+    const projectDir = join(root, 'project-real');
+    const aliasDir = join(root, 'project-alias');
+    const codexHomeDir = join(root, '.codex-home');
+    try {
+      await mkdir(projectDir, { recursive: true });
+      await symlink(projectDir, aliasDir, process.platform === 'win32' ? 'junction' : 'dir');
+      await writeRollout(codexHomeDir, '2026-03-10T12:00:00.000Z', 'rollout-2026-03-10T12-00-00-session-a.jsonl', [
+        {
+          type: 'session_meta',
+          payload: {
+            id: 'session-a',
+            timestamp: '2026-03-10T12:00:00.000Z',
+            cwd: projectDir,
+          },
+        },
+        {
+          type: 'event_msg',
+          payload: {
+            type: 'user_message',
+            message: 'Find the matching project session despite path aliases.',
+          },
+        },
+      ]);
+
+      const report = await searchSessionHistory({
+        query: 'matching project session',
+        project: 'current',
+        codexHomeDir,
+        cwd: aliasDir,
+      });
+
+      assert.equal(report.results.length, 1);
+      assert.equal(report.results[0].session_id, 'session-a');
+      assert.equal(report.results[0].cwd, projectDir);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 

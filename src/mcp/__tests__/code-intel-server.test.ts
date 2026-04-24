@@ -2,6 +2,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  buildFastSingleFileTscArgs,
+  buildProjectTscArgs,
+  buildReferenceSearchCommand,
+} from '../code-intel.js';
 
 const REQUIRED_TOOLS = [
   'lsp_diagnostics',
@@ -16,6 +21,91 @@ const REQUIRED_TOOLS = [
 ] as const;
 
 describe('mcp/code-intel-server module contract', () => {
+  it('builds a fast single-file tsc command with safe defaults', () => {
+    const args = buildFastSingleFileTscArgs('src/hud/render.ts');
+
+    assert.deepEqual(args, [
+      '--noEmit',
+      '--pretty',
+      'false',
+      '--skipLibCheck',
+      '--target',
+      'ES2022',
+      '--module',
+      'NodeNext',
+      '--moduleResolution',
+      'NodeNext',
+      'src/hud/render.ts',
+    ]);
+  });
+
+  it('preserves project-level diagnostics args for directory checks', () => {
+    assert.deepEqual(buildProjectTscArgs('/repo/tsconfig.json'), [
+      '--noEmit',
+      '--pretty',
+      'false',
+      '--project',
+      '/repo/tsconfig.json',
+    ]);
+  });
+
+  it('builds ripgrep reference search commands that skip generated directories', () => {
+    const command = buildReferenceSearchCommand('sanitizeDynamicText', '/repo', 'rg');
+
+    assert.equal(command.cmd, 'rg');
+    assert.deepEqual(command.args, [
+      '--line-number',
+      '--with-filename',
+      '--glob',
+      '!node_modules/**',
+      '--glob',
+      '!dist/**',
+      '--glob',
+      '!.git/**',
+      '--type-add',
+      'omxcode:*.ts',
+      '--type-add',
+      'omxcode:*.tsx',
+      '--type-add',
+      'omxcode:*.js',
+      '--type-add',
+      'omxcode:*.jsx',
+      '--type-add',
+      'omxcode:*.py',
+      '--type-add',
+      'omxcode:*.go',
+      '--type-add',
+      'omxcode:*.rs',
+      '--word-regexp',
+      '--type',
+      'omxcode',
+      'sanitizeDynamicText',
+      '/repo',
+    ]);
+  });
+
+  it('falls back to grep with exclude-dir flags when ripgrep is unavailable', () => {
+    const command = buildReferenceSearchCommand('sanitizeDynamicText', '/repo', 'grep');
+
+    assert.equal(command.cmd, 'grep');
+    assert.deepEqual(command.args, [
+      '-rn',
+      '--exclude-dir=node_modules',
+      '--exclude-dir=dist',
+      '--exclude-dir=.git',
+      '--include=*.ts',
+      '--include=*.tsx',
+      '--include=*.js',
+      '--include=*.jsx',
+      '--include=*.py',
+      '--include=*.go',
+      '--include=*.rs',
+      '-w',
+      'sanitizeDynamicText',
+      '/repo',
+    ]);
+  });
+
   it('declares expected MCP tools and diagnostics command shape', async () => {
     const src = await readFile(join(process.cwd(), 'src/mcp/code-intel-server.ts'), 'utf8');
 
@@ -24,7 +114,6 @@ describe('mcp/code-intel-server module contract', () => {
       assert.ok(toolNames.includes(tool), `missing tool declaration: ${tool}`);
     }
 
-    assert.match(src, /const args = \['--noEmit', '--pretty', 'false'\]/);
     assert.match(src, /new Server\(\s*\{ name: 'omx-code-intel', version: '0\.1\.0' \}/);
   });
 

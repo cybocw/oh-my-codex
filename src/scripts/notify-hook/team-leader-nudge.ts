@@ -88,7 +88,7 @@ function classifyLeaderActionState({
   const tasksComplete = pending === 0 && blocked === 0 && inProgress === 0;
   const pendingFollowUpTasks = allWorkersIdle && pending > 0 && blocked === 0 && inProgress === 0;
   const blockedWaitingOnLeader = allWorkersIdle && blocked > 0 && pending === 0 && inProgress === 0;
-  const terminalWaitingOnLeader = allWorkersIdle && tasksComplete && workerPanesAlive;
+  const terminalWaitingOnLeader = allWorkersIdle && tasksComplete;
   const stalledWaitingOnLeader = blockedWaitingOnLeader || teamProgressStalled;
 
   if (terminalWaitingOnLeader) return 'done_waiting_on_leader';
@@ -370,7 +370,8 @@ function hasTrackableActiveWorkerTurns(workerSnapshot, previousTurnCounts) {
 }
 
 function formatDurationMs(durationMs) {
-  const seconds = Math.max(1, Math.round(durationMs / 1000));
+  // Truncate partial seconds so notification copy stays stable around threshold boundaries.
+  const seconds = Math.max(1, Math.floor(durationMs / 1000));
   if (seconds < 60) return `${seconds}s`;
   if (seconds % 60 === 0) return `${seconds / 60}m`;
   const minutes = Math.floor(seconds / 60);

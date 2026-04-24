@@ -15,6 +15,12 @@ import { join, relative, extname, basename, resolve } from 'path';
 import { existsSync } from 'fs';
 import { promisify } from 'util';
 import { autoStartStdioMcpServer } from './bootstrap.js';
+import {
+  buildFastSingleFileTscArgs,
+  buildProjectTscArgs,
+  buildReferenceSearchCommand,
+  type FastTscCompilerOptions,
+} from './code-intel.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -63,7 +69,7 @@ function parseTscOutput(output: string, projectDir: string): Diagnostic[] {
   let match;
   while ((match = re.exec(output)) !== null) {
     diagnostics.push({
-      file: join(projectDir, match[1]),
+      file: resolve(projectDir, match[1]),
       line: parseInt(match[2], 10),
       character: parseInt(match[3], 10),
       severity: match[4] as 'error' | 'warning',
@@ -82,24 +88,71 @@ async function findTsconfig(dir: string): Promise<string | null> {
   return null;
 }
 
+async function readFastCompilerOptions(tsconfig: string | null): Promise<FastTscCompilerOptions> {
+  if (!tsconfig || !existsSync(tsconfig)) {
+    return {};
+  }
+
+  try {
+    const raw = await readFile(tsconfig, 'utf-8');
+    const parsed = JSON.parse(raw) as { compilerOptions?: Record<string, unknown> };
+    const compilerOptions = parsed.compilerOptions || {};
+    const asString = (value: unknown) => (typeof value === 'string' ? value : undefined);
+    const asBoolean = (value: unknown) => (typeof value === 'boolean' ? value : undefined);
+
+    return {
+      target: asString(compilerOptions.target),
+      module: asString(compilerOptions.module),
+      moduleResolution: asString(compilerOptions.moduleResolution),
+      jsx: asString(compilerOptions.jsx),
+      allowJs: asBoolean(compilerOptions.allowJs),
+      checkJs: asBoolean(compilerOptions.checkJs),
+    };
+  } catch (err) {
+    process.stderr.write(`[code-intel-server] operation failed: ${err}\n`);
+    return {};
+  }
+}
+
+async function findReferenceSearchBinary(): Promise<'rg' | 'grep'> {
+  for (const bin of ['rg', 'grep'] as const) {
+    try {
+      const finder = process.platform === 'win32' ? 'where' : 'which';
+      await execFileAsync(finder, [bin]);
+      return bin;
+    } catch (err) {
+      process.stderr.write(`[code-intel-server] operation failed: ${err}\n`);
+    }
+  }
+
+  return 'grep';
+}
+
 async function runTscDiagnostics(
   target: string,
   projectDir: string,
-  severity?: string
+  severity?: string,
+  mode: 'project' | 'fast-file' = 'project',
 ): Promise<{ diagnostics: Diagnostic[]; command: string }> {
   const tsconfig = await findTsconfig(projectDir);
-  const args = ['--noEmit', '--pretty', 'false'];
-  if (tsconfig) {
-    args.push('--project', tsconfig);
-  }
+  const args = mode === 'fast-file' && target
+    ? buildFastSingleFileTscArgs(target, await readFastCompilerOptions(tsconfig))
+    : buildProjectTscArgs(tsconfig);
 
   const { stdout, stderr } = await exec('npx', ['tsc', ...args], { cwd: projectDir, timeout: 60000 });
   const output = stdout + '\n' + stderr;
   let diagnostics = parseTscOutput(output, projectDir);
+  const normalizedTarget = target ? resolve(target) : null;
 
   // Filter to specific file if target is a file (not directory)
   if (target && !target.endsWith('/') && existsSync(target)) {
-    diagnostics = diagnostics.filter(d => d.file === target || d.file.endsWith('/' + basename(target)));
+    diagnostics = diagnostics.filter((d) => {
+      const resolvedDiagnosticFile = resolve(d.file);
+      return (
+        resolvedDiagnosticFile === normalizedTarget ||
+        resolvedDiagnosticFile.endsWith(`/${basename(target)}`)
+      );
+    });
   }
 
   // Filter by severity
@@ -310,8 +363,8 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+export function buildCodeIntelServerTools() {
+  return [
     {
       name: 'lsp_diagnostics',
       description: 'Get diagnostics (errors, warnings) for a file. Uses tsc --noEmit for TypeScript projects.',
@@ -430,10 +483,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['pattern', 'replacement', 'language'],
       },
     },
-  ],
+  ];
+}
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: buildCodeIntelServerTools(),
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+export async function handleCodeIntelToolCall(request: {
+  params: { name: string; arguments?: Record<string, unknown> };
+}) {
   const { name, arguments: args } = request.params;
   const a = (args || {}) as Record<string, unknown>;
 
@@ -450,9 +509,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (parent === projectDir) break;
         projectDir = parent;
       }
-      const result = await runTscDiagnostics(file, projectDir, a.severity as string);
+      const result = await runTscDiagnostics(file, projectDir, a.severity as string, 'fast-file');
       return text({
         file,
+        strategy: 'fast-file',
         diagnosticCount: result.diagnostics.length,
         diagnostics: result.diagnostics,
         command: result.command,
@@ -462,7 +522,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'lsp_diagnostics_directory': {
       const dir = a.directory as string;
       if (!dir) return errorResult('directory is required');
-      const result = await runTscDiagnostics('', dir, a.severity as string);
+      const result = await runTscDiagnostics('', dir, a.severity as string, 'project');
       // Group by file
       const byFile: Record<string, Diagnostic[]> = {};
       for (const d of result.diagnostics) {
@@ -475,6 +535,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         totalErrors: result.diagnostics.filter(d => d.severity === 'error').length,
         totalWarnings: result.diagnostics.filter(d => d.severity === 'warning').length,
         fileCount: Object.keys(byFile).length,
+        strategy: 'project',
         diagnosticsByFile: byFile,
         command: result.command,
       });
@@ -557,11 +618,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         dir = parent;
       }
       try {
-        const { stdout } = await exec('grep', [
-          '-rn', '--include=*.ts', '--include=*.tsx', '--include=*.js', '--include=*.jsx',
-          '--include=*.py', '--include=*.go', '--include=*.rs',
-          '-w', symbol, dir,
-        ], { timeout: 15000 });
+        const searchEngine = await findReferenceSearchBinary();
+        const searchCommand = buildReferenceSearchCommand(symbol, dir, searchEngine);
+        const { stdout } = await exec(searchCommand.cmd, searchCommand.args, { timeout: 15000 });
         const refs = stdout.split('\n').filter(Boolean).map(line => {
           const match = line.match(/^(.+?):(\d+):(.+)$/);
           if (!match) return null;
@@ -583,6 +642,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return text({
           symbol,
+          searchEngine,
           includeDeclaration: effectiveIncludeDeclaration,
           referenceCount: filteredRefs.length,
           references: filteredRefs.slice(0, 100),
@@ -656,6 +716,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     default:
       return { content: [{ type: 'text' as const, text: `Unknown tool: ${name}` }], isError: true };
   }
-});
+}
+
+server.setRequestHandler(CallToolRequestSchema, handleCodeIntelToolCall);
 
 autoStartStdioMcpServer('code_intel', server);

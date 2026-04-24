@@ -10,6 +10,8 @@ import { sleepSync } from '../utils/sleep.js';
 import { resolveCommandPathForPlatform } from '../utils/platform-command.js';
 import { buildCapturePaneArgv as sharedBuildCapturePaneArgv } from '../scripts/tmux-hook-engine.js';
 
+const TMUX_COMMAND_TIMEOUT_MS = 5_000;
+
 export function isTmuxAvailable(): boolean {
   return resolveCommandPathForPlatform('tmux') !== null;
 }
@@ -27,7 +29,7 @@ export function capturePaneContent(paneId: string, lines: number = 15): string {
   try {
     return execFileSync('tmux', buildCapturePaneArgv(paneId, lines), {
       encoding: 'utf-8',
-      timeout: 3000,
+      timeout: TMUX_COMMAND_TIMEOUT_MS,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch {
@@ -154,7 +156,7 @@ export function sendToPane(
 
   for (const [index, argv] of argvs.entries()) {
     const result = spawnSyncImpl('tmux', argv, {
-      timeout: 3000,
+      timeout: TMUX_COMMAND_TIMEOUT_MS,
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });

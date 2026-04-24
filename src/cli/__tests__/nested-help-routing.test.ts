@@ -28,6 +28,11 @@ describe('nested help routing', () => {
     [['autoresearch', '--help'], /Usage:[\s\S]*omx autoresearch <mission-dir>/i],
     [['hud', '--help'], /Usage:\s*\n\s*omx hud\s+Show current HUD state/i],
     [['hooks', '--help'], /Usage:\s*\n\s*omx hooks init/i],
+    [['state', '--help'], /Usage: omx state <tool-name>/i],
+    [['notepad', '--help'], /Usage: omx notepad <tool-name>/i],
+    [['project-memory', '--help'], /Usage: omx project-memory <tool-name>/i],
+    [['trace', '--help'], /Usage: omx trace <tool-name>/i],
+    [['code-intel', '--help'], /Usage: omx code-intel <tool-name>/i],
     [['tmux-hook', '--help'], /Usage:\s*\n\s*omx tmux-hook init/i],
     [['ralph', '--help'], /omx ralph - Launch Codex with ralph persistence mode active/i],
   ] satisfies Array<[string[], RegExp]>) {

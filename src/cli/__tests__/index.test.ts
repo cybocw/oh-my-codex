@@ -22,6 +22,7 @@ import {
   collectInheritableTeamWorkerArgs,
   resolveTeamWorkerLaunchArgsEnv,
   injectModelInstructionsBypassArgs,
+  injectSparkReasoningSummaryCompatArgs,
   resolveWorkerSparkModel,
   resolveSetupScopeArg,
   readPersistedSetupPreferences,
@@ -371,7 +372,7 @@ describe("resolveTeamWorkerLaunchArgsEnv (spark)", () => {
         true,
         expectedLowComplexityModel(),
       ),
-      `--model ${expectedLowComplexityModel()}`,
+      `-c model_reasoning_summary="none" --model ${expectedLowComplexityModel()}`,
     );
   });
 
@@ -406,6 +407,11 @@ describe("commandOwnsLocalHelp", () => {
       "agents-init",
       "ask",
       "autoresearch",
+      "state",
+      "notepad",
+      "project-memory",
+      "trace",
+      "code-intel",
       "deepinit",
       "hooks",
       "hud",
@@ -709,6 +715,20 @@ describe("resolveCodexLaunchPolicy", () => {
         true,
       ),
       "inside-tmux",
+    );
+  });
+
+  it("falls back to direct launch when TMUX is set but the tmux binary is unavailable", () => {
+    assert.equal(
+      resolveCodexLaunchPolicy(
+        { TMUX: "/tmp/tmux-1000/default,123,0" },
+        "darwin",
+        false,
+        false,
+        true,
+        true,
+      ),
+      "direct",
     );
   });
 
@@ -1355,6 +1375,79 @@ describe("injectModelInstructionsBypassArgs", () => {
       "-c",
       'model_instructions_file="/tmp/my-project/.omx/state/sessions/session-1/AGENTS.md"',
     ]);
+  });
+});
+
+describe("injectSparkReasoningSummaryCompatArgs", () => {
+  it("injects reasoning summary none when the launch args target a spark model", () => {
+    assert.deepEqual(
+      injectSparkReasoningSummaryCompatArgs([
+        "exec",
+        "--model",
+        "gpt-5.3-codex-spark",
+        "say hi",
+      ]),
+      [
+        "exec",
+        "--model",
+        "gpt-5.3-codex-spark",
+        "say hi",
+        "-c",
+        'model_reasoning_summary="none"',
+      ],
+    );
+  });
+
+  it("does not inject when the launch args already include a reasoning summary override", () => {
+    assert.deepEqual(
+      injectSparkReasoningSummaryCompatArgs([
+        "exec",
+        "--model",
+        "gpt-5.3-codex-spark",
+        "-c",
+        'model_reasoning_summary="detailed"',
+        "say hi",
+      ]),
+      [
+        "exec",
+        "--model",
+        "gpt-5.3-codex-spark",
+        "-c",
+        'model_reasoning_summary="detailed"',
+        "say hi",
+      ],
+    );
+  });
+
+  it("injects when the configured root model is spark and args omit an explicit model", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "omx-index-codex-home-"));
+    try {
+      await writeFile(
+        join(codexHome, "config.toml"),
+        'model = "gpt-5.3-codex-spark"\nmodel_reasoning_summary = "detailed"\n',
+      );
+
+      assert.deepEqual(
+        injectSparkReasoningSummaryCompatArgs(["exec", "say hi"], codexHome),
+        ["exec", "say hi", "-c", 'model_reasoning_summary="none"'],
+      );
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("skips compatibility injection for help requests", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "omx-index-codex-home-"));
+    try {
+      await writeFile(join(codexHome, "config.toml"), 'model = "gpt-5.3-codex-spark"\n');
+
+      assert.deepEqual(
+        injectSparkReasoningSummaryCompatArgs(["exec", "--help"], codexHome),
+        ["exec", "--help"],
+      );
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
   });
 });
 

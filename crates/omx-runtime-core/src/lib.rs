@@ -271,6 +271,7 @@ pub enum RuntimeEvent {
         message_id: String,
         from_worker: String,
         to_worker: String,
+        body: String,
     },
     MailboxNotified {
         message_id: String,

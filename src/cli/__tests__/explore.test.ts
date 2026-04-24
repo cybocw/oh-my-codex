@@ -378,6 +378,8 @@ describe('resolveExploreHarnessCommand', () => {
   it('hydrates a native harness for packaged installs before attempting cargo fallback', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-explore-hydrated-'));
     try {
+      const platform = process.platform;
+      const arch = process.arch;
       const assetRoot = join(wd, 'assets');
       const cacheDir = join(wd, 'cache');
       const stagingDir = join(wd, 'staging');
@@ -393,7 +395,8 @@ describe('resolveExploreHarnessCommand', () => {
       await writeFile(binaryPath, '#!/bin/sh\necho hydrated-explore\n');
       await chmod(binaryPath, 0o755);
 
-      const archivePath = join(assetRoot, 'omx-explore-harness-x86_64-unknown-linux-musl.tar.gz');
+      const archiveName = `omx-explore-harness-${platform}-${arch}.tar.gz`;
+      const archivePath = join(assetRoot, archiveName);
       const archive = spawnSync('tar', ['-czf', archivePath, '-C', stagingDir, packagedExploreHarnessBinaryName()], { encoding: 'utf-8' });
       assert.equal(archive.status, 0, archive.stderr || archive.stdout);
       const archiveBuffer = await readFile(archivePath);
@@ -427,14 +430,14 @@ describe('resolveExploreHarnessCommand', () => {
           assets: [{
             product: 'omx-explore-harness',
             version: '0.8.15',
-            platform: 'linux',
-            arch: 'x64',
-            archive: 'omx-explore-harness-x86_64-unknown-linux-musl.tar.gz',
+            platform,
+            arch,
+            archive: archiveName,
             binary: 'omx-explore-harness',
             binary_path: 'omx-explore-harness',
             sha256: checksum,
             size: archiveBuffer.length,
-            download_url: `${server.baseUrl}/omx-explore-harness-x86_64-unknown-linux-musl.tar.gz`,
+            download_url: `${server.baseUrl}/${archiveName}`,
           }],
         }, null, 2));
 

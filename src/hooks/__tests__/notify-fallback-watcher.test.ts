@@ -9,6 +9,15 @@ import { randomUUID } from 'node:crypto';
 import { initTeamState, enqueueDispatchRequest, readDispatchRequest } from '../../team/state.js';
 import { writeSessionStart } from '../session.js';
 
+// Full-suite and instrumented runs can add tens of seconds of scheduling delay to watcher process tests.
+const WATCHER_WAIT_TIMEOUT_MS = 30_000;
+const WATCHER_EXIT_TIMEOUT_MS = 20_000;
+const WATCHER_TEST_MAX_LIFETIME_MS = 10_000;
+const WATCHER_RECENT_EVENT_FUTURE_MS = 30_000;
+const WATCHER_FRESH_AUTO_NUDGE_STALL_MS = 60_000;
+const WATCHER_PARENT_GUARD_TIMEOUT_MS = 60_000;
+const WATCHER_ISOLATED_HOME = join(tmpdir(), 'omx-notify-test-home');
+
 async function appendLine(path: string, line: object): Promise<void> {
   const prev = await readFile(path, 'utf-8');
   const content = prev + `${JSON.stringify(line)}\n`;
@@ -36,7 +45,11 @@ async function sleep(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function waitFor(predicate: () => Promise<boolean>, timeoutMs: number = 3000, stepMs: number = 50): Promise<void> {
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  timeoutMs: number = WATCHER_WAIT_TIMEOUT_MS,
+  stepMs: number = 50,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -55,7 +68,7 @@ function isPidAlive(pid: number | undefined): boolean {
   }
 }
 
-async function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number = 4000): Promise<void> {
+async function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number = WATCHER_EXIT_TIMEOUT_MS): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await Promise.race([
     once(child, 'exit'),
@@ -63,6 +76,25 @@ async function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number = 
       throw new Error(`process ${child.pid ?? 'unknown'} did not exit within ${timeoutMs}ms`);
     }),
   ]);
+}
+
+async function spawnTrackedParentProcess(): Promise<ReturnType<typeof spawn>> {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  });
+  assert.ok(child.pid, 'expected tracked parent pid');
+  await waitFor(async () => isPidAlive(child.pid), WATCHER_WAIT_TIMEOUT_MS, 50);
+  return child;
+}
+
+async function stopTrackedParentProcess(child: ReturnType<typeof spawn>): Promise<void> {
+  const pid = child.pid;
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return;
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGTERM');
+    await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS);
+  }
+  await waitFor(async () => !isPidAlive(pid), WATCHER_WAIT_TIMEOUT_MS, 50);
 }
 
 function buildFakeTmux(
@@ -153,8 +185,18 @@ exit 0
 function buildCleanNotifyEnv(
   overrides: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
+  const inheritedEnv: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(inheritedEnv)) {
+    if (key.startsWith('OMX_')) delete inheritedEnv[key];
+  }
+  const isolatedHome = overrides.HOME ?? overrides.USERPROFILE ?? WATCHER_ISOLATED_HOME;
   return {
-    ...process.env,
+    ...inheritedEnv,
+    HOME: isolatedHome,
+    USERPROFILE: isolatedHome,
+    OMX_SESSION_ID: '',
+    CODEX_SESSION_ID: '',
+    SESSION_ID: '',
     OMX_TEAM_WORKER: '',
     OMX_TEAM_STATE_ROOT: '',
     OMX_TEAM_LEADER_CWD: '',
@@ -166,6 +208,25 @@ function buildCleanNotifyEnv(
 }
 
 describe('notify-fallback watcher', () => {
+  it('does not inherit parent HOME values into watcher child environments by default', () => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+
+    try {
+      process.env.HOME = join(tmpdir(), `omx-parent-home-${randomUUID()}`);
+      process.env.USERPROFILE = join(tmpdir(), `omx-parent-userprofile-${randomUUID()}`);
+
+      const env = buildCleanNotifyEnv();
+      assert.equal(env.HOME, WATCHER_ISOLATED_HOME);
+      assert.equal(env.USERPROFILE, WATCHER_ISOLATED_HOME);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+
   it('one-shot mode forwards only recent task_complete events', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-once-'));
     const tempHome = await mkdtemp(join(tmpdir(), 'omx-fallback-home-'));
@@ -179,7 +240,7 @@ describe('notify-fallback watcher', () => {
       await mkdir(sessionDir, { recursive: true });
 
       const staleIso = new Date(Date.now() - 60_000).toISOString();
-      const freshIso = new Date(Date.now() + 2_000).toISOString();
+      const freshIso = new Date(Date.now() + WATCHER_RECENT_EVENT_FUTURE_MS).toISOString();
       const threadId = `thread-${sid}`;
       const staleTurn = `turn-stale-${sid}`;
       const freshTurn = `turn-fresh-${sid}`;
@@ -298,7 +359,7 @@ describe('notify-fallback watcher', () => {
       await waitFor(async () => {
         const turnLines = await readLines(turnLog);
         return turnLines.length === 1 && new RegExp(partialTurn).test(turnLines[0] ?? '');
-      }, 4000, 75);
+      }, WATCHER_WAIT_TIMEOUT_MS, 75);
 
       child.kill('SIGTERM');
       await once(child, 'exit');
@@ -385,7 +446,7 @@ describe('notify-fallback watcher', () => {
       await waitFor(async () => {
         const turnLines = await readLines(turnLog);
         return turnLines.length === 1 && new RegExp(newTurn).test(turnLines[0] ?? '');
-      }, 4000, 75);
+      }, WATCHER_WAIT_TIMEOUT_MS, 75);
 
       child.kill('SIGTERM');
       await once(child, 'exit');
@@ -561,6 +622,66 @@ describe('notify-fallback watcher', () => {
     }
   });
 
+  it('does not inherit parent OMX leader nudge env into watcher child processes', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-leader-nudge-clean-env-'));
+    const fakeBinDir = join(wd, 'fake-bin');
+    const tmuxLogPath = join(wd, 'tmux.log');
+    const previousLeaderStaleMs = process.env.OMX_TEAM_LEADER_STALE_MS;
+    const previousLeaderNudgeMs = process.env.OMX_TEAM_LEADER_NUDGE_MS;
+    try {
+      process.env.OMX_TEAM_LEADER_STALE_MS = '600000';
+      process.env.OMX_TEAM_LEADER_NUDGE_MS = '600000';
+      await mkdir(join(wd, '.omx', 'logs'), { recursive: true });
+      await mkdir(join(wd, '.omx', 'state', 'team', 'dispatch-team'), { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      await writeFile(join(wd, '.omx', 'state', 'team-state.json'), JSON.stringify({
+        active: true,
+        team_name: 'dispatch-team',
+        current_phase: 'team-exec',
+      }, null, 2));
+      await writeFile(join(wd, '.omx', 'state', 'hud-state.json'), JSON.stringify({
+        last_turn_at: new Date(Date.now() - 300_000).toISOString(),
+        turn_count: 3,
+      }, null, 2));
+      await writeFile(join(wd, '.omx', 'state', 'team', 'dispatch-team', 'config.json'), JSON.stringify({
+        name: 'dispatch-team',
+        tmux_session: 'omx-team-dispatch-team',
+        leader_pane_id: '%42',
+      }, null, 2));
+
+      const watcherScript = new URL('../../../dist/scripts/notify-fallback-watcher.js', import.meta.url).pathname;
+      const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;
+      const result = spawnSync(
+        process.execPath,
+        [watcherScript, '--once', '--cwd', wd, '--notify-script', notifyHook],
+        {
+          encoding: 'utf-8',
+          env: buildCleanNotifyEnv({
+            PATH: `${fakeBinDir}:${process.env.PATH || ''}`,
+          }),
+        },
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf8').catch(() => '');
+      assert.match(tmuxLog, /send-keys -t %42 -l Team dispatch-team: leader stale/);
+
+      const watcherStatePath = join(wd, '.omx', 'state', 'notify-fallback-state.json');
+      const watcherState = JSON.parse(await readFile(watcherStatePath, 'utf-8'));
+      assert.equal(watcherState.leader_nudge?.stale_threshold_ms, 180_000);
+      assert.equal(watcherState.leader_nudge?.precomputed_leader_stale, true);
+    } finally {
+      if (previousLeaderStaleMs === undefined) delete process.env.OMX_TEAM_LEADER_STALE_MS;
+      else process.env.OMX_TEAM_LEADER_STALE_MS = previousLeaderStaleMs;
+      if (previousLeaderNudgeMs === undefined) delete process.env.OMX_TEAM_LEADER_NUDGE_MS;
+      else process.env.OMX_TEAM_LEADER_NUDGE_MS = previousLeaderNudgeMs;
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
 
   it('skips fallback watcher leader nudges when the leader is not stale even if mailbox messages exist', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-leader-nudge-fresh-'));
@@ -705,7 +826,7 @@ describe('notify-fallback watcher', () => {
         autoNudge: { enabled: true, delaySec: 0 },
       }, null, 2));
       await writeFile(join(wd, '.omx', 'state', 'hud-state.json'), JSON.stringify({
-        last_turn_at: new Date(Date.now() - 1_000).toISOString(),
+        last_turn_at: new Date().toISOString(),
         turn_count: 8,
         last_agent_output: 'If you want, I can keep going from here.',
       }, null, 2));
@@ -722,7 +843,7 @@ describe('notify-fallback watcher', () => {
             CODEX_HOME: codexHome,
             TMUX: '1',
             TMUX_PANE: '%42',
-            OMX_NOTIFY_FALLBACK_AUTO_NUDGE_STALL_MS: '5000',
+            OMX_NOTIFY_FALLBACK_AUTO_NUDGE_STALL_MS: String(WATCHER_FRESH_AUTO_NUDGE_STALL_MS),
           }),
         },
       );
@@ -1512,7 +1633,10 @@ describe('notify-fallback watcher', () => {
         { cwd: wd, stdio: 'pipe', env },
       );
 
-      await Promise.all([waitForExit(first, 4000), waitForExit(second, 4000)]);
+      await Promise.all([
+        waitForExit(first, WATCHER_EXIT_TIMEOUT_MS),
+        waitForExit(second, WATCHER_EXIT_TIMEOUT_MS),
+      ]);
       assert.equal(first.exitCode, 0);
       assert.equal(second.exitCode, 0);
 
@@ -1675,14 +1799,11 @@ describe('notify-fallback watcher', () => {
     const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;
     const logPath = join(wd, '.omx', 'logs', `notify-fallback-${new Date().toISOString().split('T')[0]}.jsonl`);
     let child: ReturnType<typeof spawn> | undefined;
+    let trackedParent: ReturnType<typeof spawn> | undefined;
 
     try {
-      const shortLivedParent = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)'], {
-        stdio: 'ignore',
-      });
-      assert.ok(shortLivedParent.pid, 'expected short-lived parent pid');
-      const parentPid = shortLivedParent.pid as number;
-      await once(shortLivedParent, 'exit');
+      trackedParent = await spawnTrackedParentProcess();
+      const parentPid = trackedParent.pid as number;
 
       child = spawn(
         process.execPath,
@@ -1697,7 +1818,7 @@ describe('notify-fallback watcher', () => {
           '--parent-pid',
           String(parentPid),
           '--max-lifetime-ms',
-          '5000',
+          String(WATCHER_TEST_MAX_LIFETIME_MS),
         ],
         {
           cwd: wd,
@@ -1706,7 +1827,10 @@ describe('notify-fallback watcher', () => {
         }
       );
 
-      await waitForExit(child, 4000);
+      await waitFor(async () => isPidAlive(child?.pid), WATCHER_WAIT_TIMEOUT_MS, 50);
+      await stopTrackedParentProcess(trackedParent);
+
+      await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS);
       assert.equal(child.exitCode, 0);
 
       const logEntries = (await readFile(logPath, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -1714,9 +1838,13 @@ describe('notify-fallback watcher', () => {
         entry.type === 'watcher_stop' && entry.reason === 'parent_gone'
       )));
     } finally {
+      if (trackedParent && isPidAlive(trackedParent.pid)) {
+        trackedParent.kill('SIGTERM');
+        await waitForExit(trackedParent, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
+      }
       if (child && isPidAlive(child.pid)) {
         child.kill('SIGTERM');
-        await waitForExit(child, 4000).catch(() => {});
+        await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
       }
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });
@@ -1843,6 +1971,7 @@ describe('notify-fallback watcher', () => {
     const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;
     const logPath = join(wd, '.omx', 'logs', `notify-fallback-${new Date().toISOString().split('T')[0]}.jsonl`);
     let child: ReturnType<typeof spawn> | undefined;
+    let trackedParent: ReturnType<typeof spawn> | undefined;
 
     try {
       await mkdir(sessionStateDir, { recursive: true });
@@ -1864,12 +1993,8 @@ describe('notify-fallback watcher', () => {
       await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
       await chmod(join(fakeBinDir, 'tmux'), 0o755);
 
-      const shortLivedParent = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)'], {
-        stdio: 'ignore',
-      });
-      assert.ok(shortLivedParent.pid, 'expected short-lived parent pid');
-      const parentPid = shortLivedParent.pid as number;
-      await once(shortLivedParent, 'exit');
+      trackedParent = await spawnTrackedParentProcess();
+      const parentPid = trackedParent.pid as number;
 
       child = spawn(
         process.execPath,
@@ -1884,7 +2009,7 @@ describe('notify-fallback watcher', () => {
           '--parent-pid',
           String(parentPid),
           '--max-lifetime-ms',
-          '5000',
+          String(WATCHER_TEST_MAX_LIFETIME_MS),
         ],
         {
           cwd: wd,
@@ -1893,10 +2018,13 @@ describe('notify-fallback watcher', () => {
         }
       );
 
+      await waitFor(async () => isPidAlive(child?.pid), WATCHER_WAIT_TIMEOUT_MS, 50);
+      await stopTrackedParentProcess(trackedParent);
+
       await waitFor(async () => {
         const tmuxLog = await readFile(tmuxLogPath, 'utf-8').catch(() => '');
         return /send-keys -t %42 -l Ralph loop active continue \[OMX_TMUX_INJECT\]/.test(tmuxLog);
-      }, 4000, 50);
+      }, WATCHER_WAIT_TIMEOUT_MS, 50);
 
       assert.ok(isPidAlive(child.pid), 'expected watcher to stay alive while Ralph remains active');
 
@@ -1907,7 +2035,7 @@ describe('notify-fallback watcher', () => {
         tmux_pane_id: '%42',
       }, null, 2));
 
-      await waitForExit(child, 4000);
+      await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS);
       assert.equal(child.exitCode, 0);
 
       const logEntries = (await readFile(logPath, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -1918,9 +2046,13 @@ describe('notify-fallback watcher', () => {
         entry.type === 'watcher_stop' && entry.reason === 'parent_gone'
       )));
     } finally {
+      if (trackedParent && isPidAlive(trackedParent.pid)) {
+        trackedParent.kill('SIGTERM');
+        await waitForExit(trackedParent, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
+      }
       if (child && isPidAlive(child.pid)) {
         child.kill('SIGTERM');
-        await waitForExit(child, 4000).catch(() => {});
+        await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
       }
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });
@@ -1934,6 +2066,7 @@ describe('notify-fallback watcher', () => {
     const tmuxLogPath = join(wd, 'tmux.log');
     const teamStatePath = join(wd, '.omx', 'state', 'team-state.json');
     let child: ReturnType<typeof spawn> | undefined;
+    let trackedParent: ReturnType<typeof spawn> | undefined;
 
     try {
       await mkdir(join(wd, '.omx', 'logs'), { recursive: true });
@@ -1959,12 +2092,8 @@ describe('notify-fallback watcher', () => {
       const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;
       const logPath = join(wd, '.omx', 'logs', `notify-fallback-${new Date().toISOString().split('T')[0]}.jsonl`);
 
-      const shortLivedParent = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)'], {
-        stdio: 'ignore',
-      });
-      assert.ok(shortLivedParent.pid, 'expected short-lived parent pid');
-      const parentPid = shortLivedParent.pid as number;
-      await once(shortLivedParent, 'exit');
+      trackedParent = await spawnTrackedParentProcess();
+      const parentPid = trackedParent.pid as number;
 
       child = spawn(
         process.execPath,
@@ -1979,7 +2108,7 @@ describe('notify-fallback watcher', () => {
           '--parent-pid',
           String(parentPid),
           '--max-lifetime-ms',
-          '5000',
+          String(WATCHER_TEST_MAX_LIFETIME_MS),
         ],
         {
           cwd: wd,
@@ -1988,17 +2117,12 @@ describe('notify-fallback watcher', () => {
         }
       );
 
-      await waitFor(async () => isPidAlive(child?.pid), 4000, 50);
+      await waitFor(async () => isPidAlive(child?.pid), WATCHER_WAIT_TIMEOUT_MS, 50);
+      await stopTrackedParentProcess(trackedParent);
       await waitFor(async () => {
-        const logEntries = (await readFile(logPath, 'utf-8').catch(() => ''))
-          .trim()
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => JSON.parse(line));
-        return logEntries.some((entry: { type?: string; reason?: string }) => (
-          entry.type === 'watcher_parent_guard' && entry.reason === 'parent_gone_deferred_for_active_team'
-        ));
-      }, 4000, 50);
+        const tmuxLog = await readFile(tmuxLogPath, 'utf-8').catch(() => '');
+        return /list-panes -t dispatch-team -F #\{pane_id\} #\{pane_pid\}/.test(tmuxLog);
+      }, WATCHER_PARENT_GUARD_TIMEOUT_MS, 50);
 
       assert.ok(isPidAlive(child.pid), 'expected watcher to stay alive while team worker panes remain active');
 
@@ -2009,7 +2133,7 @@ describe('notify-fallback watcher', () => {
         completed_at: new Date().toISOString(),
       }, null, 2));
 
-      await waitForExit(child, 4000);
+      await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS);
       assert.equal(child.exitCode, 0);
 
       const logEntries = (await readFile(logPath, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -2020,9 +2144,13 @@ describe('notify-fallback watcher', () => {
         entry.type === 'watcher_stop' && entry.reason === 'parent_gone'
       )));
     } finally {
+      if (trackedParent && isPidAlive(trackedParent.pid)) {
+        trackedParent.kill('SIGTERM');
+        await waitForExit(trackedParent, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
+      }
       if (child && isPidAlive(child.pid)) {
         child.kill('SIGTERM');
-        await waitForExit(child, 4000).catch(() => {});
+        await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
       }
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });
@@ -2035,6 +2163,7 @@ describe('notify-fallback watcher', () => {
     const fakeBinDir = join(wd, 'fake-bin');
     const tmuxLogPath = join(wd, 'tmux.log');
     let child: ReturnType<typeof spawn> | undefined;
+    let trackedParent: ReturnType<typeof spawn> | undefined;
 
     try {
       await mkdir(join(wd, '.omx', 'logs'), { recursive: true });
@@ -2063,12 +2192,8 @@ describe('notify-fallback watcher', () => {
       const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;
       const logPath = join(wd, '.omx', 'logs', `notify-fallback-${new Date().toISOString().split('T')[0]}.jsonl`);
 
-      const shortLivedParent = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)'], {
-        stdio: 'ignore',
-      });
-      assert.ok(shortLivedParent.pid, 'expected short-lived parent pid');
-      const parentPid = shortLivedParent.pid as number;
-      await once(shortLivedParent, 'exit');
+      trackedParent = await spawnTrackedParentProcess();
+      const parentPid = trackedParent.pid as number;
 
       child = spawn(
         process.execPath,
@@ -2083,7 +2208,7 @@ describe('notify-fallback watcher', () => {
           '--parent-pid',
           String(parentPid),
           '--max-lifetime-ms',
-          '5000',
+          String(WATCHER_TEST_MAX_LIFETIME_MS),
         ],
         {
           cwd: wd,
@@ -2092,7 +2217,10 @@ describe('notify-fallback watcher', () => {
         }
       );
 
-      await waitForExit(child, 4000);
+      await waitFor(async () => isPidAlive(child?.pid), WATCHER_WAIT_TIMEOUT_MS, 50);
+      await stopTrackedParentProcess(trackedParent);
+
+      await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS);
       assert.equal(child.exitCode, 0);
 
       const logEntries = (await readFile(logPath, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -2103,9 +2231,13 @@ describe('notify-fallback watcher', () => {
         entry.type === 'watcher_stop' && entry.reason === 'parent_gone'
       )));
     } finally {
+      if (trackedParent && isPidAlive(trackedParent.pid)) {
+        trackedParent.kill('SIGTERM');
+        await waitForExit(trackedParent, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
+      }
       if (child && isPidAlive(child.pid)) {
         child.kill('SIGTERM');
-        await waitForExit(child, 4000).catch(() => {});
+        await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
       }
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });
@@ -2136,7 +2268,7 @@ describe('notify-fallback watcher', () => {
           '--parent-pid',
           String(process.pid),
           '--max-lifetime-ms',
-          '5000',
+          String(WATCHER_TEST_MAX_LIFETIME_MS),
         ],
         {
           cwd: wd,
@@ -2169,7 +2301,7 @@ describe('notify-fallback watcher', () => {
           '--parent-pid',
           String(process.pid),
           '--max-lifetime-ms',
-          '5000',
+          String(WATCHER_TEST_MAX_LIFETIME_MS),
         ],
         {
           cwd: wd,
@@ -2238,7 +2370,7 @@ describe('notify-fallback watcher', () => {
         }
       );
 
-      await waitForExit(child, 4000);
+      await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS);
       assert.equal(child.exitCode, 0);
 
       const logEntries = (await readFile(logPath, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -2248,7 +2380,7 @@ describe('notify-fallback watcher', () => {
     } finally {
       if (child && isPidAlive(child.pid)) {
         child.kill('SIGTERM');
-        await waitForExit(child, 4000).catch(() => {});
+        await waitForExit(child, WATCHER_EXIT_TIMEOUT_MS).catch(() => {});
       }
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });

@@ -216,6 +216,8 @@ fn invoke_codex(args: &Args, model: &str, prompt_contract: &str) -> io::Result<A
         .arg("-c")
         .arg("model_reasoning_effort=\"low\"")
         .arg("-c")
+        .arg("model_reasoning_summary=\"none\"")
+        .arg("-c")
         .arg("shell_environment_policy.inherit=all")
         .arg("--skip-git-repo-check")
         .arg("-o")
@@ -698,13 +700,19 @@ fn validate_repo_paths(command_name: &str, args: &[String]) -> Result<(), String
     let candidate_paths = command_path_operands(command_name, args);
     for operand in candidate_paths {
         let normalized = normalize_candidate_path(&repo_root, operand);
-        if !normalized.starts_with(&repo_root) {
+        let canonical_candidate = canonicalize_existing_prefix(&normalized);
+        let canonical_inside_repo = canonical_candidate
+            .as_ref()
+            .zip(canonical_repo_root.as_ref())
+            .is_some_and(|(candidate, canonical_root)| candidate.starts_with(canonical_root));
+
+        if !normalized.starts_with(&repo_root) && !canonical_inside_repo {
             return Err(format!(
                 "path `{operand}` escapes the omx explore repository root {}",
                 repo_root.display()
             ));
         }
-        if let Some(canonical_candidate) = canonicalize_existing_prefix(&normalized) {
+        if let Some(canonical_candidate) = canonical_candidate {
             if let Some(canonical_repo_root) = &canonical_repo_root {
                 if !canonical_candidate.starts_with(canonical_repo_root) {
                     return Err(format!(
@@ -1146,6 +1154,35 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn validate_direct_command_accepts_repo_internal_alias_absolute_paths() {
+        let _guard = env_lock();
+        let root = temp_allowlist_dir().expect("temp root");
+        let real_root = root.path.join("real-root");
+        let alias_root = root.path.join("alias-root");
+        let repo = real_root.join("repo");
+        create_dir_all(repo.join("nested")).expect("create repo");
+        write(repo.join("nested").join("file.txt"), "ok").expect("write file");
+        symlink(&real_root, &alias_root).expect("create alias root");
+
+        unsafe {
+            env::set_var(HARNESS_ROOT_ENV, alias_root.join("repo"));
+        }
+        let result = validate_direct_command(
+            "cat",
+            &[repo.join("nested").join("file.txt").display().to_string()],
+        );
+        unsafe {
+            env::remove_var(HARNESS_ROOT_ENV);
+        }
+
+        assert!(
+            result.is_ok(),
+            "alias path inside repo should stay allowlisted: {result:?}"
+        );
+    }
+
     #[test]
     fn command_path_operands_handle_double_dash_and_find_roots() {
         let rg_args = vec![
@@ -1221,6 +1258,47 @@ exit 17
         }
 
         let _error = result.expect_err("both attempts should fail");
+    }
+
+    #[test]
+    fn invoke_codex_forces_reasoning_summary_none_for_spark_compatibility() {
+        let _guard = env_lock();
+        let root = temp_allowlist_dir().expect("temp root");
+        let repo = root.path.join("repo");
+        create_dir_all(&repo).expect("create repo");
+        let capture = root.path.join("codex-args.txt");
+        let fake_codex = root.path.join("codex-stub");
+        write_executable(
+            &fake_codex,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 17\n",
+                shell_quote(&capture.display().to_string())
+            ),
+        )
+        .expect("write fake codex");
+
+        let args = Args {
+            cwd: repo,
+            prompt: "find tests".to_string(),
+            prompt_file: root.path.join("prompt.md"),
+            spark_model: "spark-model".to_string(),
+            fallback_model: "fallback-model".to_string(),
+        };
+
+        unsafe {
+            env::set_var(CODEX_BIN_ENV, &fake_codex);
+        }
+        let attempt = invoke_codex(&args, &args.spark_model, "contract").expect("invoke codex");
+        unsafe {
+            env::remove_var(CODEX_BIN_ENV);
+        }
+
+        assert_eq!(attempt.status_code, 17);
+        let captured = read_to_string(&capture).expect("capture args");
+        assert!(
+            captured.contains("model_reasoning_summary=\"none\""),
+            "expected reasoning summary override in args: {captured}"
+        );
     }
 
     #[test]

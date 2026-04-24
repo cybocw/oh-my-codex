@@ -88,6 +88,7 @@ fn summary_mode_uses_codex_exec_and_model_override() {
     assert!(args.contains("--model"));
     assert!(args.contains("spark-test-model"));
     assert!(args.contains("model_reasoning_effort=\"low\""));
+    assert!(args.contains("model_reasoning_summary=\"none\""));
 
     let prompt = fs::read_to_string(prompt_log).expect("prompt log");
     assert!(prompt.contains("Command family: generic-shell"));

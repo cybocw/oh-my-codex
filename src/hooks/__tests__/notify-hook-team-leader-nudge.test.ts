@@ -1629,7 +1629,13 @@ exit 0
       assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-      assert.match(tmuxLog, /Team worker-turn-stall-threshold: worker panes stalled, no progress 45s/);
+      assert.match(tmuxLog, /Team worker-turn-stall-threshold: worker panes stalled, no progress /);
+      assert.match(tmuxLog, /Next: omx team status worker-turn-stall-threshold; read worker messages; unblock\/reassign or shutdown\./);
+
+      const eventsPath = join(teamDir, 'events', 'events.ndjson');
+      const events = (await readFile(eventsPath, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+      const nudgeEvent = events.find((e: { type?: string }) => e.type === 'team_leader_nudge');
+      assert.equal(nudgeEvent?.reason, 'stuck_waiting_on_leader');
     });
   });
 
